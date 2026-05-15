@@ -1,9 +1,10 @@
 streamlit
 earthengine-api
-geemap
+geemap==0.32.1
+xyzservices==2023.10.1
+python-box==7.1.1
 pandas
 numpy
 plotly
 scikit-learn
 joblib
-python-box==7.1.1
