@@ -3,7 +3,8 @@ earthengine-api
 geemap==0.32.1
 xyzservices==2023.10.1
 python-box==7.1.1
-setuptools==81.0.0
+setuptools
+ipython
 pandas
 numpy
 plotly
