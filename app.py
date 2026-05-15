@@ -73,11 +73,12 @@ def init_ee():
                 
             creds = service_account.Credentials.from_service_account_info(key_dict)
             ee.Initialize(credentials=creds)
+            return True, "Authenticated via Secrets"
         else:
             ee.Initialize() # Fallback for local environment
-        return True
+            return True, "Authenticated via Local Default"
     except Exception as e:
-        return False
+        return False, str(e)
 
 @st.cache_data
 def load_ml_mdl():
@@ -133,11 +134,12 @@ st.markdown('</div>', unsafe_allow_html=True)
 
 # --- ELEGANT LOADING UI & INITIALIZATION ---
 with st.spinner("🛰️ Establishing secure connection to Earth Engine & warming up AI Models..."):
-    gee_status = init_ee()
+    gee_status, gee_msg = init_ee()
     mdl = load_ml_mdl()
 
 if not gee_status:
-    st.markdown('<div class="glass-card"><div class="disclaimer">⚠️ GEE Authentication Failed. Maps will run in offline/dummy mode until the Google Service Account is configured in Streamlit Secrets.</div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="glass-card"><div class="disclaimer">⚠️ GEE Authentication Failed. Please configure the Google Service Account JSON in Streamlit Secrets.</div></div>', unsafe_allow_html=True)
+    st.error(f"Auth Error Detail: {gee_msg}")
 
 if not mdl:
     st.sidebar.warning("⚠️ Local .joblib missing. Using synthetic inferencer.")
@@ -150,8 +152,12 @@ with c1:
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
     st.subheader(f"🛰️ LST Spatial Distribution: {sel_cty}")
     
-    f_map = gen_gee_map(sel_cty, is_dp)
-    f_map.to_streamlit(height=450)
+    # GUARDRAIL: Do not render map if GEE Auth failed!
+    if gee_status:
+        f_map = gen_gee_map(sel_cty, is_dp)
+        f_map.to_streamlit(height=450)
+    else:
+        st.warning("🗺️ Map visualization is currently disabled due to missing/invalid Earth Engine credentials. Check the error message above.")
         
     st.markdown('</div>', unsafe_allow_html=True)
 
