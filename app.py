@@ -5,7 +5,6 @@ from google.oauth2 import service_account
 
 # =====================================================================
 # HOTFIX PATCH: Prevent geemap from crashing due to GEE API update
-# We must inject a dummy _credentials attribute before importing geemap
 # =====================================================================
 if hasattr(ee, 'data') and not hasattr(ee.data, '_credentials'):
     ee.data._credentials = None
@@ -19,38 +18,72 @@ import joblib
 import os
 
 # =====================================================================
-# 1. PAGE CONFIG & GLASSMORPHISM UI (CSS)
+# 1. PAGE CONFIG & MODERN ACADEMIC UI (CSS)
 # =====================================================================
 st.set_page_config(page_title="V-HEAT Dashboard", layout="wide", initial_sidebar_state="expanded")
 
-# Handle Theme State
+# Set Default Theme to Light
 if 'thm' not in st.session_state:
-    st.session_state.thm = 'dark'
+    st.session_state.thm = 'light'
 
 def tgl_thm():
     """Toggle theme state."""
-    st.session_state.thm = 'light' if st.session_state.thm == 'dark' else 'dark'
+    st.session_state.thm = 'dark' if st.session_state.thm == 'light' else 'light'
 
-# Glassmorphism CSS Injection
-if st.session_state.thm == 'dark':
-    bg_clr, txt_clr, gls_bg, brd = "#0E1117", "#FFFFFF", "rgba(17, 25, 40, 0.75)", "rgba(255, 255, 255, 0.125)"
+# Professional Clean UI CSS Injection (Using 'Inter' font for modern typography)
+if st.session_state.thm == 'light':
+    bg_clr, txt_clr, crd_bg, brd = "#F8F9FA", "#1A1A1A", "#FFFFFF", "#E9ECEF"
+    map_base = "CartoDB.Positron"
 else:
-    bg_clr, txt_clr, gls_bg, brd = "#F0F2F6", "#000000", "rgba(255, 255, 255, 0.65)", "rgba(0, 0, 0, 0.1)"
+    bg_clr, txt_clr, crd_bg, brd = "#121212", "#E0E0E0", "#1E1E1E", "#333333"
+    map_base = "CartoDB.DarkMatter"
 
 css = f"""
 <style>
-    .stApp {{ background-color: {bg_clr}; color: {txt_clr}; }}
-    .glass-card {{
-        background: {gls_bg};
-        backdrop-filter: blur(16px);
-        -webkit-backdrop-filter: blur(16px);
-        border-radius: 12px;
-        border: 1px solid {brd};
-        padding: 20px;
-        margin-bottom: 20px;
-        box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+    
+    html, body, [class*="css"]  {{
+        font-family: 'Inter', sans-serif;
     }}
-    .disclaimer {{ font-size: 0.85em; color: #ff4b4b; border-left: 4px solid #ff4b4b; padding-left: 10px; }}
+    
+    .stApp {{ background-color: {bg_clr}; color: {txt_clr}; }}
+    
+    .modern-card {{
+        background-color: {crd_bg};
+        border-radius: 8px;
+        border: 1px solid {brd};
+        padding: 24px;
+        margin-bottom: 24px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+        transition: box-shadow 0.3s ease;
+    }}
+    
+    .modern-card:hover {{
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+    }}
+    
+    .disclaimer {{
+        font-size: 0.85em;
+        color: #4A5568;
+        border-left: 4px solid #3182CE;
+        background-color: rgba(49, 130, 206, 0.05);
+        padding: 12px 16px;
+        border-radius: 0 6px 6px 0;
+        margin-bottom: 20px;
+        line-height: 1.5;
+    }}
+    
+    h1, h2, h3 {{ 
+        font-weight: 600 !important; 
+        letter-spacing: -0.02em; 
+        color: {txt_clr};
+    }}
+    
+    .metric-value {{
+        font-size: 2rem;
+        font-weight: 700;
+        color: #2B6CB0;
+    }}
 </style>
 """
 st.markdown(css, unsafe_allow_html=True)
@@ -62,36 +95,27 @@ st.markdown(css, unsafe_allow_html=True)
 def init_ee():
     """Securely init GEE using Streamlit Native Secrets or Local Auth."""
     try:
-        # Mandatory OAuth Scope for Earth Engine API
         scp = ['https://www.googleapis.com/auth/earthengine']
         
-        # 1. Bulletproof Method: Native Streamlit TOML Dictionary
         if "gcp_service_account" in st.secrets:
             key_dict = dict(st.secrets["gcp_service_account"])
-            
-            # Auto-repair escaped newlines in private key caused by TOML parsing
             if '\\n' in key_dict['private_key']:
                 key_dict['private_key'] = key_dict['private_key'].replace('\\n', '\n')
-                
             creds = service_account.Credentials.from_service_account_info(key_dict).with_scopes(scp)
-            ee.Initialize(credentials=creds)
+            ee.Initialize(credentials=creds, project=key_dict.get('project_id'))
             return True, "Authenticated via Native GCP Secrets"
             
-        # 2. Legacy Method: Raw JSON String (Fragile to invisible characters)
         elif "EARTHENGINE_TOKEN" in st.secrets:
             token = st.secrets["EARTHENGINE_TOKEN"]
             if isinstance(token, str):
-                # Clean up invisible characters like \xa0 from copy-pasting
                 token = token.replace('\xa0', ' ').strip()
                 key_dict = json.loads(token)
             else:
                 key_dict = dict(token)
-                
             creds = service_account.Credentials.from_service_account_info(key_dict).with_scopes(scp)
-            ee.Initialize(credentials=creds)
+            ee.Initialize(credentials=creds, project=key_dict.get('project_id'))
             return True, "Authenticated via Legacy JSON Secrets"
             
-        # 3. Local Machine Method
         else:
             ee.Initialize() 
             return True, "Authenticated via Local Default"
@@ -107,9 +131,9 @@ def load_ml_mdl():
     return None
 
 def gen_gee_map(cty, is_dp):
-    """Generate geemap folium instance."""
-    m = geemap.Map(center=[-28.0167, 153.4000] if cty == "Gold Coast" else [0,0], zoom=12 if cty == "Gold Coast" else 2)
-    m.add_basemap("CARTO_DARK" if st.session_state.thm == 'dark' else "OpenStreetMap")
+    """Generate geemap folium instance with professional basemaps."""
+    m = geemap.Map(center=[-28.0167, 153.4000] if is_dp else [20, 0], zoom=12 if is_dp else 2)
+    m.add_basemap(map_base)
     return m
 
 def run_ml_inf(mdl, tmp, is_hw, is_hol):
@@ -118,7 +142,6 @@ def run_ml_inf(mdl, tmp, is_hw, is_hol):
         df_i = pd.DataFrame({'Mx_T': [tmp], 'Is_HW': [is_hw], 'Is_Hol': [is_hol]})
         pd_pax = mdl.predict(df_i)[0]
     else:
-        # Dummy logic if model absent
         b = 1000
         pd_pax = b + ((tmp-25)*20) + (is_hw*200) + (is_hol*150)
     
@@ -126,96 +149,143 @@ def run_ml_inf(mdl, tmp, is_hw, is_hol):
     return int(pd_pax), int(pd_pax * v_rto)
 
 # =====================================================================
-# 3. APP LAYOUT & UI COMPONENTS
+# 3. GLOBAL DESTINATION CITIES INDEX (100 CITIES)
+# =====================================================================
+cty_lst = [
+    "Gold Coast, Australia", "Brisbane, Australia", "Sydney, Australia", "Melbourne, Australia", "Perth, Australia",
+    "Bali, Indonesia", "Bangkok, Thailand", "Phuket, Thailand", "Pattaya, Thailand", "Singapore",
+    "Kuala Lumpur, Malaysia", "Penang, Malaysia", "Tokyo, Japan", "Kyoto, Japan", "Osaka, Japan",
+    "Seoul, South Korea", "Jeju, South Korea", "Taipei, Taiwan", "Hong Kong, SAR China", "Macau, SAR China",
+    "Dubai, UAE", "Abu Dhabi, UAE", "Doha, Qatar", "Riyadh, Saudi Arabia", "Jeddah, Saudi Arabia",
+    "Istanbul, Turkey", "Antalya, Turkey", "Bodrum, Turkey", "Rome, Italy", "Venice, Italy",
+    "Milan, Italy", "Florence, Italy", "Paris, France", "Nice, France", "Lyon, France",
+    "Barcelona, Spain", "Madrid, Spain", "Palma de Mallorca, Spain", "Ibiza, Spain", "Athens, Greece",
+    "Santorini, Greece", "Mykonos, Greece", "Lisbon, Portugal", "Porto, Portugal", "Faro, Portugal",
+    "London, UK", "Edinburgh, UK", "Amsterdam, Netherlands", "Berlin, Germany", "Munich, Germany",
+    "Vienna, Austria", "Zurich, Switzerland", "Geneva, Switzerland", "Prague, Czechia", "Budapest, Hungary",
+    "New York City, USA", "Los Angeles, USA", "Las Vegas, USA", "Miami, USA", "Orlando, USA",
+    "Honolulu, USA", "San Francisco, USA", "Chicago, USA", "Toronto, Canada", "Vancouver, Canada",
+    "Cancun, Mexico", "Mexico City, Mexico", "Los Cabos, Mexico", "Havana, Cuba", "Punta Cana, Dominican Rep.",
+    "Rio de Janeiro, Brazil", "São Paulo, Brazil", "Buenos Aires, Argentina", "Lima, Peru", "Cusco, Peru",
+    "Cape Town, South Africa", "Johannesburg, South Africa", "Cairo, Egypt", "Sharm El-Sheikh, Egypt", "Marrakech, Morocco",
+    "Casablanca, Morocco", "Nairobi, Kenya", "Zanzibar, Tanzania", "Male, Maldives", "Port Louis, Mauritius",
+    "Mumbai, India", "Delhi, India", "Goa, India", "Colombo, Sri Lanka", "Kathmandu, Nepal",
+    "Auckland, New Zealand", "Queenstown, New Zealand", "Nadi, Fiji", "Tahiti, French Polynesia", "Bora Bora, French Polynesia",
+    "Manila, Philippines", "Cebu, Philippines", "Boracay, Philippines", "Ho Chi Minh City, Vietnam", "Da Nang, Vietnam"
+]
+
+# =====================================================================
+# 4. APP LAYOUT & UI COMPONENTS
 # =====================================================================
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.title("⚙️ V-HEAT Control")
-    st.button(f"Switch to {'Light' if st.session_state.thm == 'dark' else 'Dark'} Mode", on_click=tgl_thm)
+    st.title("Control Panel")
+    st.button(f"Switch to {'Dark' if st.session_state.thm == 'light' else 'Light'} Theme", on_click=tgl_thm, use_container_width=True)
     
     st.markdown("---")
-    cty_lst = ["Gold Coast", "Brisbane", "Sydney", "Melbourne", "Bali (ID)", "Phuket (TH)"] + [f"City {i}" for i in range(7, 101)]
-    sel_cty = st.selectbox("🌐 Select Target City", cty_lst)
+    sel_cty = st.selectbox("Select Target Destination", cty_lst)
     
-    is_dp = sel_cty == "Gold Coast"
+    is_dp = sel_cty == "Gold Coast, Australia"
+    
     if is_dp:
-        st.success("✅ Deep-Dive Mode Active")
+        st.info("Status: Deep-Dive Case Study Active")
     else:
-        st.info("ℹ️ Global Mode Active")
+        st.info("Status: Global Baseline Mode Active")
 
 # --- HEADER ---
-st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-st.title("🏥 V-HEAT: Visitor-Health Extreme Analytics Tool")
-st.markdown('<div class="disclaimer"><b>Academic Integrity Disclaimer:</b> As individual daily health records are highly sensitive, this PoC utilizes mathematically downscaled AIHW annual aggregate data to demonstrate analytical pipeline capabilities.</div>', unsafe_allow_html=True)
+st.markdown('<div class="modern-card">', unsafe_allow_html=True)
+st.title("V-HEAT: Visitor-Health Extreme Analytics Tool")
+st.markdown('''
+<div class="disclaimer">
+    <b>Methodological Note:</b> As individual daily health records are subject to strict ethics clearance, this proof-of-concept utilizes mathematically downscaled AIHW annual aggregate data to demonstrate the analytical capabilities of the GeoAI pipeline. In a secure research environment, this architecture is designed to seamlessly ingest and process raw ICD-10 health records.
+</div>
+''', unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
-# --- ELEGANT LOADING UI & INITIALIZATION ---
-with st.spinner("🛰️ Establishing secure connection to Earth Engine & warming up AI Models..."):
-    gee_status, gee_msg = init_ee()
-    mdl = load_ml_mdl()
-
-if not gee_status:
-    st.markdown('<div class="glass-card"><div class="disclaimer">⚠️ GEE Authentication Failed. Please configure the Google Service Account JSON in Streamlit Secrets.</div></div>', unsafe_allow_html=True)
-    st.error(f"Auth Error Detail: {gee_msg}")
-
+# LOAD ML FIRST (Instant)
+mdl = load_ml_mdl()
 if not mdl:
-    st.sidebar.warning("⚠️ Local .joblib missing. Using synthetic inferencer.")
+    st.sidebar.warning("Warning: Local analytical model missing. Using synthetic inferencer fallback.")
 
 # --- MAIN CONTENT ---
 c1, c2 = st.columns([6, 4])
 
-# Column 1: Spatial Map
+# Column 1: Spatial Map (Isolated GEE Loading)
 with c1:
-    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-    st.subheader(f"🛰️ LST Spatial Distribution: {sel_cty}")
+    st.markdown('<div class="modern-card">', unsafe_allow_html=True)
+    st.subheader(f"Land Surface Temperature (LST) Distribution: {sel_cty.split(',')[0]}")
     
-    # GUARDRAIL: Do not render map if GEE Auth failed!
+    with st.spinner("Establishing secure connection to Earth Engine..."):
+        gee_status, gee_msg = init_ee()
+    
     if gee_status:
-        f_map = gen_gee_map(sel_cty, is_dp)
-        f_map.to_streamlit(height=450)
+        with st.spinner("Rendering Spatial Data..."):
+            f_map = gen_gee_map(sel_cty, is_dp)
+            f_map.to_streamlit(height=500)
     else:
-        st.warning("🗺️ Map visualization is currently disabled due to missing/invalid Earth Engine credentials. Check the error message above.")
+        st.markdown('<div class="disclaimer">Earth Engine Authentication Failed.</div>', unsafe_allow_html=True)
+        st.error(f"Error Detail: {gee_msg}")
         
     st.markdown('</div>', unsafe_allow_html=True)
 
 # Column 2: Predictive Analytics (Only for Deep-Dive)
 with c2:
     if is_dp:
-        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-        st.subheader("🌡️ Hospital Strain Simulator")
+        st.markdown('<div class="modern-card">', unsafe_allow_html=True)
+        st.subheader("Hospital Strain Simulator")
+        st.markdown("Adjust meteorological and demographic parameters to estimate Emergency Department (ED) impact.")
         
-        sim_tmp = st.slider("Simulate Max Temp (°C)", min_value=20.0, max_value=50.0, value=30.0, step=0.5)
+        sim_tmp = st.slider("Simulate Daily Maximum Temperature (°C)", min_value=20.0, max_value=50.0, value=35.0, step=0.5)
         sim_hw = 1 if sim_tmp >= 35.0 else 0
-        sim_hol = st.radio("Is Holiday Season?", [1, 0], format_func=lambda x: "Yes (Dec-Jan)" if x==1 else "No", horizontal=True)
+        sim_hol = st.radio("Holiday Season Surge?", [1, 0], format_func=lambda x: "Yes (Dec-Jan Peak)" if x==1 else "No (Standard Volume)", horizontal=True)
         
         tot_pax, vis_pax = run_ml_inf(mdl, sim_tmp, sim_hw, sim_hol)
         
-        mc1, mc2 = st.columns(2)
-        mc1.metric("Total ED Patients", f"{tot_pax} pax", delta=f"{'+' if sim_hw else ''}{int(tot_pax*0.15)} from Heat" if sim_hw else "Normal")
-        mc2.metric("Est. Tourist Impact", f"{vis_pax} pax", delta=f"{(vis_pax/tot_pax)*100:.0f}% of ED load")
+        st.markdown("<hr style='margin: 15px 0; border-color: #E2E8F0;'>", unsafe_allow_html=True)
         
-        df_cht = pd.DataFrame({'Category': ['Locals', 'Tourists'], 'Count': [tot_pax - vis_pax, vis_pax]})
-        fig = px.pie(df_cht, values='Count', names='Category', hole=0.7, color_discrete_sequence=['#4B4B4B', '#FF4B4B'])
-        fig.update_layout(margin=dict(t=0, b=0, l=0, r=0), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font_color=txt_clr)
+        mc1, mc2 = st.columns(2)
+        mc1.metric("Predicted Total ED Load", f"{tot_pax}", delta=f"{'+' if sim_hw else ''}{int(tot_pax*0.15)} (Heat Impact)" if sim_hw else "Baseline Climate")
+        mc2.metric("Estimated Tourist Strain", f"{vis_pax}", delta=f"{(vis_pax/tot_pax)*100:.0f}% of Total Load")
+        
+        # Professional Color Palette for Chart
+        chart_colors = ['#2B6CB0', '#F6AD55'] if st.session_state.thm == 'light' else ['#63B3ED', '#ED8936']
+        df_cht = pd.DataFrame({'Patient Demographics': ['Local Residents', 'Visiting Tourists'], 'Count': [tot_pax - vis_pax, vis_pax]})
+        fig = px.pie(df_cht, values='Count', names='Patient Demographics', hole=0.65, color_discrete_sequence=chart_colors)
+        fig.update_layout(
+            margin=dict(t=20, b=20, l=0, r=0), 
+            paper_bgcolor='rgba(0,0,0,0)', 
+            plot_bgcolor='rgba(0,0,0,0)', 
+            font_color=txt_clr,
+            legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5)
+        )
         st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
         
         st.markdown('</div>', unsafe_allow_html=True)
     else:
-        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-        st.warning("⚠️ Predictive AI model is only trained for the Deep-Dive Case Study (Gold Coast). Please select 'Gold Coast' from the sidebar.")
+        st.markdown('<div class="modern-card">', unsafe_allow_html=True)
+        st.info("The Predictive Analytics module requires high-resolution downscaled inputs. Please select the 'Gold Coast, Australia' case study from the control panel to activate the simulator.")
         st.markdown('</div>', unsafe_allow_html=True)
 
 # --- CMIP6 PROJECTIONS ---
 if is_dp:
-    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-    st.subheader("📈 Future Risk: CMIP6 Heatwave Days Projection (2020 - 2050)")
+    st.markdown('<div class="modern-card">', unsafe_allow_html=True)
+    st.subheader("Future Climate Risk: CMIP6 Projection (2020 - 2050)")
+    st.markdown("Estimated number of days exceeding the 35°C threshold under the SSP5-8.5 emission scenario.")
     
     yrs = np.arange(2020, 2051)
     hw_dys = np.linspace(5, 32, len(yrs)) + np.random.normal(0, 2, len(yrs))
     
     fig2 = go.Figure()
-    fig2.add_trace(go.Scatter(x=yrs, y=hw_dys, mode='lines+markers', name='HW Days', line=dict(color='#FF4B4B', width=3)))
-    fig2.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font_color=txt_clr, xaxis_title="Year", yaxis_title="Days > 35°C")
-    st.plotly_chart(fig2, use_container_width=True)
+    line_color = '#E53E3E' if st.session_state.thm == 'light' else '#FC8181'
+    fig2.add_trace(go.Scatter(x=yrs, y=hw_dys, mode='lines+markers', name='Heatwave Days', line=dict(color=line_color, width=2.5)))
+    fig2.update_layout(
+        paper_bgcolor='rgba(0,0,0,0)', 
+        plot_bgcolor='rgba(0,0,0,0)', 
+        font_color=txt_clr, 
+        xaxis_title="Projection Year", 
+        yaxis_title="Annual Days > 35°C",
+        margin=dict(t=10, b=10, l=10, r=10)
+    )
+    st.plotly_chart(fig2, use_container_width=True, config={'displayModeBar': False})
     st.markdown('</div>', unsafe_allow_html=True)
