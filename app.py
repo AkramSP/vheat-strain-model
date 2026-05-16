@@ -64,6 +64,8 @@ st.markdown(css, unsafe_allow_html=True)
 # =====================================================================
 if 'selected_city' not in st.session_state:
     st.session_state.selected_city = "Gold Coast, Australia"
+if 'selected_year' not in st.session_state:
+    st.session_state.selected_year = 2023
 if 'rf_downscale_run' not in st.session_state:
     st.session_state.rf_downscale_run = False
 if 'rf_results' not in st.session_state:
@@ -129,7 +131,7 @@ def safe_stat(d, key):
     return round(d.get(key, 0.0), 1) if d and d.get(key) is not None else 0.0
 
 @st.cache_data(show_spinner=False)
-def gen_baseline_map(lat, lon, gee_ready):
+def gen_baseline_map(lat, lon, year, gee_ready):
     m = geemap.Map(center=[lat, lon], zoom=12, ee_initialize=False, draw_control=False, measure_control=False)
     m.add_basemap("CartoDB.Positron")
     stats_dict = {"min": 0.0, "mean": 0.0, "max": 0.0}
@@ -143,7 +145,7 @@ def gen_baseline_map(lat, lon, gee_ready):
         
         month_filter = ee.Filter.calendarRange(6, 8, 'month') if lat > 0 else ee.Filter.calendarRange(12, 2, 'month')
             
-        l8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2").filterBounds(roi).filterDate('2019-01-01', '2024-12-31').filter(month_filter)
+        l8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2").filterBounds(roi).filterDate(f'{year}-01-01', f'{year}-12-31').filter(month_filter)
         if l8.size().getInfo() > 0:
             def mask_l8(img):
                 qa = img.select('QA_PIXEL')
@@ -171,14 +173,14 @@ def gen_baseline_map(lat, lon, gee_ready):
         
     return m.to_html(), stats_dict
 
-def run_rf_downscaling_split(lat, lon):
+def run_rf_downscaling_split(lat, lon, year):
     try:
         pt = ee.Geometry.Point([lon, lat])
         roi = pt.buffer(8000)
         
         month_filter = ee.Filter.calendarRange(6, 8, 'month') if lat > 0 else ee.Filter.calendarRange(12, 2, 'month')
         
-        l8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2").filterBounds(roi).filterDate('2021-01-01', '2024-12-31').filter(month_filter)
+        l8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2").filterBounds(roi).filterDate(f'{year}-01-01', f'{year}-12-31').filter(month_filter)
         def mask_l8(img):
             qa = img.select('QA_PIXEL')
             mask = qa.bitwiseAnd(1 << 4).eq(0).And(qa.bitwiseAnd(1 << 3).eq(0))
@@ -193,7 +195,8 @@ def run_rf_downscaling_split(lat, lon):
         slope = ee.Terrain.slope(elev).rename('Slope')
         aspect = ee.Terrain.aspect(elev).rename('Aspect')
         
-        s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED').filterBounds(roi).filterDate('2021-01-01', '2024-12-31').filter(month_filter).filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)).median()
+        # Use previous years for context if selected year is missing S2
+        s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED').filterBounds(roi).filterDate(f'{year}-01-01', f'{year}-12-31').filter(month_filter).filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)).median()
         ndvi = s2.normalizedDifference(['B8', 'B4']).rename('NDVI')
         ndbi = s2.normalizedDifference(['B11', 'B8']).rename('NDBI')
         ndwi = s2.normalizedDifference(['B3', 'B8']).rename('NDWI')
@@ -247,10 +250,6 @@ def run_rf_downscaling_split(lat, lon):
         return None, str(e), None, None, None, None
 
 def run_ml_inf(mdl, tmp, is_hw, is_hol, scale_factor=1.0):
-    """
-    ML Inference with Dynamic Demographic Scaling!
-    Menyesuaikan prediksi rumah sakit berdasarkan rasio volume turis kota terpilih terhadap kota Gold Coast (baseline model).
-    """
     if mdl:
         df_i = pd.DataFrame({'Mx_T': [tmp], 'Is_HW': [is_hw], 'Is_Hol': [is_hol]})
         pd_pax = mdl.predict(df_i)[0] * scale_factor
@@ -261,10 +260,10 @@ def run_ml_inf(mdl, tmp, is_hw, is_hol, scale_factor=1.0):
     return int(pd_pax), int(pd_pax * v_rto)
 
 # =====================================================================
-# 4. DATABASE DESTINASI (Diperluas: Seluruh Kota Besar Australia)
+# 4. DATABASE DESTINASI
 # =====================================================================
 cty_coords = [
-    # Australia (Primary Integration Target)
+    # Australia 
     {"City": "Gold Coast, Australia", "Lat": -28.0167, "Lon": 153.4000, "Tourists_M": 12.0, "Avg_Summer_LST": 34.5, "Continent": "Oceania"},
     {"City": "Brisbane, Australia", "Lat": -27.4705, "Lon": 153.0260, "Tourists_M": 8.0, "Avg_Summer_LST": 36.2, "Continent": "Oceania"},
     {"City": "Sydney, Australia", "Lat": -33.8688, "Lon": 151.2093, "Tourists_M": 16.0, "Avg_Summer_LST": 32.5, "Continent": "Oceania"},
@@ -327,7 +326,6 @@ cty_coords = [
     {"City": "Marrakech, Morocco", "Lat": 31.6295, "Lon": -7.9811, "Tourists_M": 3.0, "Avg_Summer_LST": 40.0, "Continent": "Africa"}
 ]
 df_cities = pd.DataFrame(cty_coords)
-# Mengubah tag tipe lokasi berdasarkan asal negaranya
 df_cities['Type'] = np.where(df_cities['City'].str.contains('Australia'), 'Primary Study (AU)', 'Global Baseline')
 
 # =====================================================================
@@ -358,9 +356,9 @@ with tab_nav:
     with c_nav2:
         st.markdown("<br>", unsafe_allow_html=True)
         if "Australia" in st.session_state.selected_city:
-            st.markdown("**Status:** 🟢 Full Integration Active (Remote Sensing + Local Health Data + NASA CMIP6)")
+            st.markdown("**Status:** 🟢 Full Integration Active (Remote Sensing + Local Health Data + NASA CMIP6 Forecast)")
         else:
-            st.markdown("**Status:** 🔵 Partial Mode (Remote Sensing + NASA CMIP6 Only).")
+            st.markdown("**Status:** 🔵 Partial Mode (Remote Sensing + NASA CMIP6 Forecast Only).")
     st.markdown('</div>', unsafe_allow_html=True)
 
 # TAB GLOBAL 50 CITIES CHART
@@ -371,20 +369,20 @@ with tab_global:
     
     fig_global = px.scatter(df_cities, x='Avg_Summer_LST', y='Tourists_M', size='Tourists_M', color='Type', 
                             hover_name='City', size_max=40, opacity=0.7,
-                            labels={'Avg_Summer_LST': 'Average Summer LST (°C)', 'Tourists_M': 'Annual Tourists (Millions)'},
+                            labels={'Avg_Summer_LST': 'Historical Average Summer LST (°C)', 'Tourists_M': 'Annual Tourists (Millions)'},
                             color_discrete_map={"Primary Study (AU)": "#E53E3E", "Global Baseline": "#3182CE"})
     fig_global.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=10, b=10, l=10, r=10), height=400)
     fig_global.add_hline(y=10, line_dash="dot", line_color="gray")
     fig_global.add_vline(x=35, line_dash="dot", line_color="red")
     fig_global.add_annotation(x=42, y=25, text="High Risk Zone", showarrow=False, font=dict(color="red", size=14))
-    
     st.plotly_chart(fig_global, use_container_width=True, config={'displayModeBar': False})
+    
+    st.markdown("""<div style='font-size:0.8rem; color:#64748B;'><i><b>Data Disclaimer:</b> Annual tourist volumes are synthetic estimates derived from historical global indexes (e.g., Mastercard Global Destination Cities Index) for Proof of Concept purposes. Average LST values represent a static GEE baseline abstraction.</i></div>""", unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
 city_row = df_cities[df_cities['City'] == st.session_state.selected_city].iloc[0]
 sel_lat, sel_lon = city_row['Lat'], city_row['Lon']
 
-# OUT OF THE BOX: Unlock if the city is in Australia!
 is_dp = ("Australia" in st.session_state.selected_city)
 season_txt = "Jun-Aug" if sel_lat > 0 else "Dec-Feb"
 
@@ -394,51 +392,70 @@ c1, c2 = st.columns([1.1, 0.9], gap="large")
 # PILLAR 1: SPATIAL HAZARD
 with c1:
     st.markdown('<div class="modern-card">', unsafe_allow_html=True)
-    st.subheader("1. Spatial Hazard Exposure (Remote Sensing)")
-    st.markdown(f'<span class="subtitle-text"><b>Data Source:</b> Landsat 8 TIRS. Historical multi-year peak summer ({season_txt}) thermal signatures.</span>', unsafe_allow_html=True)
     
-    # KONDISI 1: PETA BASELINE (SEBELUM DOWNSCALING)
+    # OUT OF THE BOX: Time Slider untuk Analisis Historis
+    row_title, row_slider = st.columns([2, 1])
+    with row_title:
+        st.subheader("1. Spatial Hazard Exposure")
+    with row_slider:
+        new_year = st.selectbox("Select Temporal Baseline:", [2024, 2023, 2022, 2021, 2020, 2019], index=[2024, 2023, 2022, 2021, 2020, 2019].index(st.session_state.selected_year))
+        if new_year != st.session_state.selected_year:
+            st.session_state.selected_year = new_year
+            st.session_state.rf_downscale_run = False 
+            st.rerun()
+
+    st.markdown(f'<span class="subtitle-text"><b>Data Source:</b> Landsat 8 TIRS. Peak summer ({season_txt}) thermal signatures for the year {st.session_state.selected_year}.</span>', unsafe_allow_html=True)
+    
+    # KONDISI 1: PETA BASELINE
     if not st.session_state.rf_downscale_run:
-        with st.spinner("Extracting Spatial Analytics..."):
-            map_html, base_stats = gen_baseline_map(sel_lat, sel_lon, gee_status)
+        with st.spinner(f"Extracting Spatial Analytics for {st.session_state.selected_year}..."):
+            map_html, base_stats = gen_baseline_map(sel_lat, sel_lon, st.session_state.selected_year, gee_status)
+        st.toast(f"Spatial analytics for {st.session_state.selected_city} extracted successfully!", icon="✅")
         components.html(map_html, height=430)
         
         st.markdown("##### 📍 Regional Baseline LST Panel (100m)")
         sc1, sc2, sc3 = st.columns(3)
-        sc1.metric("Min Temp", f"{base_stats['min']} °C")
-        sc2.metric("Mean Temp", f"{base_stats['mean']} °C")
-        sc3.metric("Max Temp", f"{base_stats['max']} °C")
+        sc1.metric("Coolest Area", f"{base_stats['min']} °C")
+        sc2.metric("Average Temp", f"{base_stats['mean']} °C")
+        sc3.metric("Peak Hotspot", f"{base_stats['max']} °C")
+        
+        # Inject the Average Temp from the map into the simulator!
+        if base_stats['mean'] > 0 and st.session_state.sim_temp == 35.0: # Only override if it's the default
+            st.session_state.sim_temp = float(base_stats['mean'])
         
         st.markdown("<hr style='margin: 15px 0; border-color: #E2E8F0;'>", unsafe_allow_html=True)
         st.markdown('<div class="btn-ml">', unsafe_allow_html=True)
-        if st.button("🚀 Run Spatial Downscaling Model (100m to 20m)"):
+        if st.button("Run Spatial Downscaling Model (100m to 20m)"):
             st.session_state.rf_downscale_run = True
             st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
         
     # KONDISI 2: PETA DOWNSCALE & SPLIT PANEL
     else:
-        with st.spinner("🤖 Executing Machine Learning Downscaling. Slide the center bar to compare Native vs Downscaled maps..."):
+        with st.spinner("Executing Machine Learning Downscaling. Slide the center bar to compare Native vs Downscaled maps..."):
             if st.session_state.rf_results is None:
-                map_html_rf, df_ev, rmse, r2, dict_imp, comp_stats = run_rf_downscaling_split(sel_lat, sel_lon)
+                map_html_rf, df_ev, rmse, r2, dict_imp, comp_stats = run_rf_downscaling_split(sel_lat, sel_lon, st.session_state.selected_year)
                 st.session_state.rf_results = (map_html_rf, df_ev, rmse, r2, dict_imp, comp_stats)
             else:
                 map_html_rf, df_ev, rmse, r2, dict_imp, comp_stats = st.session_state.rf_results
                 
         if map_html_rf is not None:
+            st.toast("Machine Learning Spatial Downscaling completed!", icon="✅")
             components.html(map_html_rf, height=450)
             
             st.markdown("##### 📊 LST Extracted Statistics: Native vs Downscaled")
-            st.markdown('<span class="subtitle-text">Notice how the downscaled 20m model detects higher extreme localized temperatures (Hotspots) missed by the 100m baseline.</span>', unsafe_allow_html=True)
+            st.markdown('<span class="subtitle-text">Notice how the downscaled 20m model may detect higher extreme localized temperatures (Hotspots) missed by the 100m baseline, while smoothing anomalous out-of-bounds pixels (Regression to the mean).</span>', unsafe_allow_html=True)
             
+            # Inject Downscaled Max into the Simulator
             st.session_state.sim_temp = float(comp_stats['d_max'])
             
             s1, s2, s3 = st.columns(3)
-            s1.metric("Min Temp (20m)", f"{comp_stats['d_min']} °C", f"{round(comp_stats['d_min'] - comp_stats['n_min'], 1)} °C vs Native", delta_color="inverse")
-            s2.metric("Mean Temp (20m)", f"{comp_stats['d_mean']} °C", f"{round(comp_stats['d_mean'] - comp_stats['n_mean'], 1)} °C vs Native", delta_color="off")
-            s3.metric("Local Max Temp (20m)", f"{comp_stats['d_max']} °C", f"{round(comp_stats['d_max'] - comp_stats['n_max'], 1)} °C vs Native", delta_color="inverse")
+            s1.metric("Coolest Area (20m)", f"{comp_stats['d_min']} °C", f"{round(comp_stats['d_min'] - comp_stats['n_min'], 1)} °C vs Native", delta_color="inverse")
+            s2.metric("Average Temp (20m)", f"{comp_stats['d_mean']} °C", f"{round(comp_stats['d_mean'] - comp_stats['n_mean'], 1)} °C vs Native", delta_color="off")
+            s3.metric("Peak Hotspot (20m)", f"{comp_stats['d_max']} °C", f"{round(comp_stats['d_max'] - comp_stats['n_max'], 1)} °C vs Native", delta_color="inverse")
             
-            with st.expander("Show Machine Learning Validation Metrics"):
+            with st.expander("Show Machine Learning Validation Metrics & Limitations"):
+                st.markdown("<i>Note: In Random Forest spatial regression, extreme thermal outliers (e.g., metal roofs) in 100m native pixels might be smoothed down in 20m predictions if unsupported by the predictors (NDVI/NDBI/DEM). This is a known RS phenomenon called Regression to the Mean.</i>", unsafe_allow_html=True)
                 c_rf1, c_rf2 = st.columns(2)
                 with c_rf1:
                     fig_s = px.scatter(df_ev, x='Actual', y='Predicted', title=f"Spatial R²: {r2:.2f} | RMSE: {rmse:.2f} °C")
@@ -481,7 +498,9 @@ with c2:
                 new_temp = float(pts[0].get('customdata'))
                 if st.session_state.sim_temp != new_temp:
                     st.session_state.sim_temp = new_temp
-                    st.toast(f"Simulator updated to {new_temp:.1f}°C based on CMIP6 projection.", icon="✅")
+                    # UI SYNC: Toast only appears when the simulator is physically updated
+                    st.toast(f"Simulator infrastructure scenario updated to {new_temp:.1f}°C based on CMIP6.", icon="✅")
+                    st.rerun() # Force sync slider UI immediately
         
         st.markdown("<hr style='margin: 25px 0; border-color: #E2E8F0;'>", unsafe_allow_html=True)
         
@@ -495,7 +514,6 @@ with c2:
         sim_hw = 1 if sim_tmp >= 35.0 else 0
         sim_hol = st.radio("Tourism Seasonality Exposure", [1, 0], format_func=lambda x: f"Peak Tourist Season ({season_txt})" if x==1 else "Off-Peak Season", horizontal=True)
         
-        # OUT OF THE BOX: Hitung rasio turis lokal terhadap baseline Gold Coast (12 Juta)
         city_tourists = city_row['Tourists_M']
         demographic_scale = city_tourists / 12.0
         
