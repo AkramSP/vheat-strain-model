@@ -136,9 +136,15 @@ def gen_gee_map_and_stats(cty_name, lat, lon, gee_ready):
         
     try:
         pt = ee.Geometry.Point([lon, lat])
-        roi = pt.buffer(12000) # Slightly reduced for web speed
+        roi = pt.buffer(12000) 
         
-        l8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2").filterBounds(roi).filterDate('2019-01-01', '2024-12-31').filter(ee.Filter.calendarRange(12, 2, 'month'))
+        # LOGIKA HEMISFER: Utata (Jun-Aug) vs Selatan (Dec-Feb)
+        if lat > 0:
+            month_filter = ee.Filter.calendarRange(6, 8, 'month')
+        else:
+            month_filter = ee.Filter.calendarRange(12, 2, 'month')
+            
+        l8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2").filterBounds(roi).filterDate('2019-01-01', '2024-12-31').filter(month_filter)
                
         if l8.size().getInfo() > 0:
             def mask_l8(img):
@@ -162,22 +168,29 @@ def gen_gee_map_and_stats(cty_name, lat, lon, gee_ready):
             
             m.add_colorbar(vis_params, label="Surface Temperature (°C)", orientation="horizontal")
             m.add_inspector()
-    except Exception:
+    except Exception as e:
+        print("L8 Error:", e)
         pass
         
     return m.to_html(), stats_dict
 
 def run_on_the_fly_downscaling(lat, lon):
     """
-    AKRAM'S OUT OF THE BOX IDEA: 
     Executes Random Forest Thermal Sharpening dynamically on GEE Servers.
+    Dioptimalkan (Buffer lebih kecil, titik lebih sedikit) untuk mencegah Timeout di Streamlit.
     """
     try:
         pt = ee.Geometry.Point([lon, lat])
-        roi = pt.buffer(12000) 
+        roi = pt.buffer(8000) # Diperkecil menjadi 8km untuk kecepatan render web
+        
+        # LOGIKA HEMISFER
+        if lat > 0:
+            month_filter = ee.Filter.calendarRange(6, 8, 'month')
+        else:
+            month_filter = ee.Filter.calendarRange(12, 2, 'month')
         
         # 1. Fetch L8 Native (Target)
-        l8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2").filterBounds(roi).filterDate('2022-12-01', '2024-02-28')
+        l8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2").filterBounds(roi).filterDate('2021-01-01', '2024-12-31').filter(month_filter)
         def mask_l8(img):
             qa = img.select('QA_PIXEL')
             mask = qa.bitwiseAnd(1 << 4).eq(0).And(qa.bitwiseAnd(1 << 3).eq(0))
@@ -185,7 +198,7 @@ def run_on_the_fly_downscaling(lat, lon):
         lst_100m = l8.map(mask_l8).median().select('ST_B10').multiply(0.00341802).add(149.0).subtract(273.15).rename('LST')
         
         # 2. Fetch S2 Predictors
-        s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED').filterBounds(roi).filterDate('2023-12-01', '2024-02-28').median()
+        s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED').filterBounds(roi).filterDate('2021-01-01', '2024-12-31').filter(month_filter).filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)).median()
         ndvi = s2.normalizedDifference(['B8', 'B4']).rename('NDVI')
         ndbi = s2.normalizedDifference(['B11', 'B8']).rename('NDBI')
         ndwi = s2.normalizedDifference(['B3', 'B8']).rename('NDWI')
@@ -193,12 +206,12 @@ def run_on_the_fly_downscaling(lat, lon):
         predictors = s2.select(['B2', 'B3', 'B4', 'B8']).addBands([ndvi, ndbi, ndwi])
         feat_names = ['B2', 'B3', 'B4', 'B8', 'NDVI', 'NDBI', 'NDWI']
         
-        # 3. Compile Training Data
+        # 3. Compile Training Data (NumPixels diperkecil agar tidak timeout)
         training_img = lst_100m.addBands(predictors)
-        training_pts = training_img.sample(region=roi, scale=100, numPixels=500, seed=42, geometries=True, dropNulls=True)
+        training_pts = training_img.sample(region=roi, scale=100, numPixels=300, seed=42, geometries=False, dropNulls=True)
         
-        # 4. Train RF on GEE Server (Fast configuration for web)
-        rf_model = ee.Classifier.smileRandomForest(50).setOutputMode('REGRESSION').train(
+        # 4. Train RF on GEE Server (Cepat)
+        rf_model = ee.Classifier.smileRandomForest(30).setOutputMode('REGRESSION').train(
             features=training_pts, classProperty='LST', inputProperties=feat_names
         )
         
@@ -206,7 +219,7 @@ def run_on_the_fly_downscaling(lat, lon):
         lst_20m = predictors.classify(rf_model, 'Predicted_LST')
         dict_imp = rf_model.explain().get('importance').getInfo()
         
-        # 6. Extract Validation Points to Local Server for Sklearn Metrics
+        # 6. Extract Validation Points
         predicted_pts = training_pts.classify(rf_model, 'Predicted_LST')
         val_data = predicted_pts.reduceColumns(ee.Reducer.toList(2), ['LST', 'Predicted_LST']).get('list').getInfo()
         df_eval = pd.DataFrame(val_data, columns=['Actual', 'Predicted'])
@@ -225,8 +238,7 @@ def run_on_the_fly_downscaling(lat, lon):
         
         return m.to_html(), df_eval, rmse, r2, dict_imp
     except Exception as e:
-        print("GeoAI Error:", e)
-        return None, None, None, None, None
+        return None, str(e), None, None, None
 
 def run_ml_inf(mdl, tmp, is_hw, is_hol):
     if mdl:
@@ -274,7 +286,8 @@ with c_nav1:
     new_city = st.selectbox("Select Tourism Precinct:", df_cities['City'].tolist(), index=curr_idx)
     if new_city != st.session_state.selected_city:
         st.session_state.selected_city = new_city
-        st.session_state.rf_downscale_run = False # Reset RF state when city changes
+        st.session_state.rf_downscale_run = False 
+        st.session_state.rf_results = None
         st.rerun()
 with c_nav2:
     st.markdown("<br>", unsafe_allow_html=True)
@@ -287,6 +300,7 @@ st.markdown('</div>', unsafe_allow_html=True)
 city_row = df_cities[df_cities['City'] == st.session_state.selected_city].iloc[0]
 sel_lat, sel_lon = city_row['Lat'], city_row['Lon']
 is_dp = (st.session_state.selected_city == "Gold Coast, Australia")
+season_txt = "Jun-Aug" if sel_lat > 0 else "Dec-Feb"
 
 # --- MAIN DASHBOARD: THE 3 PILLARS ---
 c1, c2 = st.columns([1.1, 0.9], gap="large")
@@ -295,15 +309,14 @@ c1, c2 = st.columns([1.1, 0.9], gap="large")
 with c1:
     st.markdown('<div class="modern-card">', unsafe_allow_html=True)
     st.subheader("1. Spatial Hazard Exposure (Remote Sensing)")
-    st.markdown('<span class="subtitle-text"><b>Data Source:</b> Landsat 8 TIRS (100m native). Map below shows historical multi-year peak summer thermal signatures.</span>', unsafe_allow_html=True)
+    st.markdown(f'<span class="subtitle-text"><b>Data Source:</b> Landsat 8 TIRS (100m native). Map below shows historical multi-year peak summer ({season_txt}) thermal signatures.</span>', unsafe_allow_html=True)
     
-    # Menampilkan Peta
+    # Menampilkan Peta Baseline
     if not st.session_state.rf_downscale_run:
         with st.spinner("Compiling Spatial Analytics..."):
             map_html, map_stats = gen_gee_map_and_stats(st.session_state.selected_city, sel_lat, sel_lon, gee_status)
         components.html(map_html, height=430)
         
-        # Opsi Jalankan ML Live
         st.markdown("<hr style='margin: 10px 0; border-color: #E2E8F0;'>", unsafe_allow_html=True)
         st.markdown('<div class="btn-geoai">', unsafe_allow_html=True)
         if st.button("🚀 Run GeoAI Thermal Sharpening (Downscale to 20m)"):
@@ -313,18 +326,18 @@ with c1:
         
     else:
         # Tampilkan Peta yang sudah di-Downscale secara Live
-        with st.spinner("🤖 Google Earth Engine is training Random Forest model on-the-fly..."):
-            if st.session_state.rf_results is None or st.session_state.rf_results[0] is None:
+        with st.spinner("🤖 Google Earth Engine is training Random Forest model on-the-fly. Please wait (~15s)..."):
+            if st.session_state.rf_results is None:
                 map_html_rf, df_ev, rmse, r2, dict_imp = run_on_the_fly_downscaling(sel_lat, sel_lon)
                 st.session_state.rf_results = (map_html_rf, df_ev, rmse, r2, dict_imp)
             else:
                 map_html_rf, df_ev, rmse, r2, dict_imp = st.session_state.rf_results
                 
-        if map_html_rf:
+        # Handle success or failure gracefullly
+        if map_html_rf is not None:
             st.success(f"✅ GEE Model Trained! Spatial R²: {r2:.2f} | RMSE: {rmse:.2f} °C")
             components.html(map_html_rf, height=430)
             
-            # Interactive Statistical Charts for the RF Model
             c_rf1, c_rf2 = st.columns(2)
             with c_rf1:
                 fig_s = px.scatter(df_ev, x='Actual', y='Predicted', title="Model Fit (Predicted vs Actual LST)")
@@ -337,11 +350,13 @@ with c1:
                 fig_i = px.bar(df_i, x='Importance', y='Feature', orientation='h', title="Random Forest Feature Importance")
                 fig_i.update_layout(height=250, margin=dict(t=30, b=0, l=0, r=0), paper_bgcolor='rgba(0,0,0,0)')
                 st.plotly_chart(fig_i, use_container_width=True, config={'displayModeBar': False})
-                
-            if st.button("🔙 Back to Baseline Map"):
-                st.session_state.rf_downscale_run = False
-                st.session_state.rf_results = None
-                st.rerun()
+        else:
+            st.error(f"❌ GeoAI Downscaling Timeout/Failed. This is typically due to GEE memory limits or dense cloud cover during {season_txt}. Detail: {df_ev}")
+            
+        if st.button("🔙 Back to Baseline Map"):
+            st.session_state.rf_downscale_run = False
+            st.session_state.rf_results = None
+            st.rerun()
 
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -352,7 +367,7 @@ with c2:
         st.subheader("2. Climate Projections (CMIP6 Forecast)")
         st.markdown('<span class="subtitle-text">NASA NEX-GDDP (Model: ACCESS-CM2, Scenario: SSP5-8.5). Use the slider below to simulate these forecasted extremes.</span>', unsafe_allow_html=True)
         
-        with st.spinner("Querying NASA CMIP6 Saptio-Temporal Database..."):
+        with st.spinner("Querying NASA CMIP6 Spatio-Temporal Database..."):
             df_cmip = get_real_cmip6_data(sel_lat, sel_lon, gee_status)
         
         fig2 = go.Figure(go.Scatter(x=df_cmip['Year'], y=df_cmip['Max_Temp'], mode='lines', fill='tozeroy', fillcolor='rgba(229, 62, 62, 0.1)', line=dict(color='#E53E3E', width=3)))
@@ -366,7 +381,7 @@ with c2:
         
         sim_tmp = st.slider("Simulate Maximum Air Temperature (°C)", min_value=25.0, max_value=45.0, value=35.0, step=0.5)
         sim_hw = 1 if sim_tmp >= 35.0 else 0
-        sim_hol = st.radio("Tourism Seasonality Exposure", [1, 0], format_func=lambda x: "Peak Tourist Season (High Exposure)" if x==1 else "Off-Peak Season (Low Exposure)", horizontal=True)
+        sim_hol = st.radio("Tourism Seasonality Exposure", [1, 0], format_func=lambda x: f"Peak Tourist Season ({season_txt})" if x==1 else "Off-Peak Season", horizontal=True)
         
         tot_pax, vis_pax = run_ml_inf(mdl, sim_tmp, sim_hw, sim_hol)
         
