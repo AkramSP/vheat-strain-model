@@ -2,11 +2,16 @@ import streamlit as st
 import streamlit.components.v1 as components
 import ee
 import json
+import warnings
 from google.oauth2 import service_account
 
 # =====================================================================
-# HOTFIX PATCH: Prevent geemap from crashing due to GEE API update
+# HOTFIX PATCH & WARNING SUPPRESSION
 # =====================================================================
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=SyntaxWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+
 if hasattr(ee, 'data') and not hasattr(ee.data, '_credentials'):
     ee.data._credentials = None
 
@@ -23,56 +28,16 @@ import os
 # =====================================================================
 st.set_page_config(page_title="V-HEAT Dashboard", layout="wide", initial_sidebar_state="collapsed")
 
-# Professional Clean Light UI CSS Injection (Using 'Inter' font for modern typography)
 css = """
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-    
-    html, body, [class*="css"]  {
-        font-family: 'Inter', sans-serif;
-    }
-    
-    /* Force Light Mode Aesthetics */
+    html, body, [class*="css"]  { font-family: 'Inter', sans-serif; }
     .stApp { background-color: #F8F9FA; color: #1A1A1A; }
-    
-    .modern-card {
-        background-color: #FFFFFF;
-        border-radius: 8px;
-        border: 1px solid #E9ECEF;
-        padding: 24px;
-        margin-bottom: 24px;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
-        transition: box-shadow 0.3s ease;
-    }
-    
-    .modern-card:hover {
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
-    }
-    
-    .disclaimer {
-        font-size: 0.85em;
-        color: #4A5568;
-        border-left: 4px solid #3182CE;
-        background-color: rgba(49, 130, 206, 0.05);
-        padding: 12px 16px;
-        border-radius: 0 6px 6px 0;
-        margin-bottom: 20px;
-        line-height: 1.5;
-    }
-    
-    h1, h2, h3 { 
-        font-weight: 600 !important; 
-        letter-spacing: -0.02em; 
-        color: #1A1A1A;
-    }
-    
-    .metric-value {
-        font-size: 2rem;
-        font-weight: 700;
-        color: #2B6CB0;
-    }
-    
-    /* Hide default sidebar toggle for a cleaner look */
+    .modern-card { background-color: #FFFFFF; border-radius: 8px; border: 1px solid #E9ECEF; padding: 24px; margin-bottom: 24px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04); transition: box-shadow 0.3s ease; }
+    .modern-card:hover { box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08); }
+    .disclaimer { font-size: 0.85em; color: #4A5568; border-left: 4px solid #3182CE; background-color: rgba(49, 130, 206, 0.05); padding: 12px 16px; border-radius: 0 6px 6px 0; margin-bottom: 20px; line-height: 1.5; }
+    h1, h2, h3 { font-weight: 600 !important; letter-spacing: -0.02em; color: #1A1A1A; }
+    .metric-value { font-size: 2rem; font-weight: 700; color: #2B6CB0; }
     [data-testid="collapsedControl"] { display: none; }
 </style>
 """
@@ -83,7 +48,7 @@ st.markdown(css, unsafe_allow_html=True)
 # =====================================================================
 @st.cache_resource
 def init_ee():
-    """Securely init GEE using Streamlit Native Secrets or Local Auth."""
+    """Securely init GEE explicitly without browser fallback."""
     try:
         scp = ['https://www.googleapis.com/auth/earthengine']
         if "gcp_service_account" in st.secrets:
@@ -94,53 +59,36 @@ def init_ee():
             ee.Initialize(credentials=creds, project=key_dict.get('project_id'))
             return True, "Authenticated via Native GCP Secrets"
         else:
-            ee.Initialize() 
-            return True, "Authenticated via Local Default"
+            # FATAL UX FIX: DO NOT fallback to ee.Initialize() without creds on Streamlit Cloud
+            # It causes infinite hanging trying to launch a browser!
+            return False, "Google Service Account Secret Key (TOML) is missing from Streamlit settings."
     except Exception as e:
         return False, str(e)
 
 @st.cache_resource
 def load_ml_mdl():
-    """Load RF model into persistent memory."""
     p = 'rf_vheat_model.joblib'
     if os.path.exists(p):
         return joblib.load(p)
     return None
 
 def gen_gee_map(cty_name, lat, lon, is_dp):
-    """Generate geemap with Actual Landsat 8 LST Satellite Layer."""
     m = geemap.Map(center=[lat, lon], zoom=11 if is_dp else 10)
     m.add_basemap("CartoDB.Positron")
-    
     try:
-        # Create a 20km buffer around the selected city
         pt = ee.Geometry.Point([lon, lat])
         roi = pt.buffer(20000) 
-        
-        # Fetch Landsat 8 LST (Median of Summer 2023 for stable visualization)
-        l8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2") \
-               .filterBounds(roi) \
-               .filterDate('2022-12-01', '2023-02-28') \
-               .filter(ee.Filter.lt('CLOUD_COVER', 30))
-               
+        l8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2").filterBounds(roi).filterDate('2022-12-01', '2023-02-28').filter(ee.Filter.lt('CLOUD_COVER', 30))
         if l8.size().getInfo() > 0:
             lst_img = l8.median().select('ST_B10').multiply(0.00341802).add(149.0).subtract(273.15)
-            vis_params = {
-                'min': 25, 
-                'max': 45, 
-                'palette': ['#0000FF', '#00FFFF', '#00FF00', '#FFFF00', '#FF0000'],
-                'opacity': 0.7
-            }
+            vis_params = {'min': 25, 'max': 45, 'palette': ['#0000FF', '#00FFFF', '#00FF00', '#FFFF00', '#FF0000'], 'opacity': 0.7}
             m.addLayer(lst_img.clip(roi), vis_params, f'LST Heatmap ({cty_name})')
             m.addLayer(ee.Image().paint(roi, 0, 2), {'palette': ['black']}, 'City Boundary')
-    except Exception as e:
-        print(f"GEE Layer Error: {e}")
+    except Exception:
         pass
-        
     return m
 
 def run_ml_inf(mdl, tmp, is_hw, is_hol):
-    """Run hospital strain prediction."""
     if mdl:
         df_i = pd.DataFrame({'Mx_T': [tmp], 'Is_HW': [is_hw], 'Is_Hol': [is_hol]})
         pd_pax = mdl.predict(df_i)[0]
@@ -151,7 +99,7 @@ def run_ml_inf(mdl, tmp, is_hw, is_hol):
     return int(pd_pax), int(pd_pax * v_rto)
 
 # =====================================================================
-# 3. GLOBAL DESTINATION CITIES DATABASE (Coordinates)
+# 3. GLOBAL DESTINATION CITIES DATABASE
 # =====================================================================
 cty_coords = [
     {"City": "Gold Coast, Australia", "Lat": -28.0167, "Lon": 153.4000},
@@ -205,15 +153,12 @@ cty_coords = [
     {"City": "Delhi, India", "Lat": 28.7041, "Lon": 77.1025},
     {"City": "Auckland, New Zealand", "Lat": -36.8485, "Lon": 174.7633},
 ]
-
 df_cities = pd.DataFrame(cty_coords)
 df_cities['Type'] = np.where(df_cities['City'] == 'Gold Coast, Australia', 'Deep-Dive Case Study', 'Global Baseline')
 
 # =====================================================================
 # 4. APP LAYOUT & UI COMPONENTS
 # =====================================================================
-
-# --- HEADER ---
 st.markdown('<div class="modern-card">', unsafe_allow_html=True)
 st.title("V-HEAT: Visitor-Health Extreme Analytics Tool")
 st.markdown('''
@@ -223,32 +168,28 @@ st.markdown('''
 ''', unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
-# LOAD ML FIRST (Instant via cache_resource)
 mdl = load_ml_mdl()
 
-# --- GLOBAL DESTINATION SELECTOR (INTERACTIVE MAP) ---
 st.markdown('<div class="modern-card">', unsafe_allow_html=True)
 st.subheader("Global Destination Index")
 st.markdown("Select a city by clicking its pin on the map below to retrieve the satellite heatmap and epidemiological pipeline.")
 
-fig_map = px.scatter_mapbox(
+# Plotly syntax update for future-proofing
+fig_map = px.scatter_map(
     df_cities, lat="Lat", lon="Lon", hover_name="City", custom_data=["City", "Lat", "Lon"],
     color="Type", color_discrete_map={"Deep-Dive Case Study": "#E53E3E", "Global Baseline": "#3182CE"},
     zoom=1.2, height=400
 )
 fig_map.update_layout(
-    mapbox_style="carto-positron", 
+    map_style="carto-positron", 
     margin={"r":0,"t":0,"l":0,"b":0},
     legend=dict(orientation="h", yanchor="bottom", y=-0.15, xanchor="center", x=0.5)
 )
 
-# Render Plotly map and capture clicks
-sel_data = st.plotly_chart(fig_map, on_select="rerun", selection_mode="points", use_container_width=True, key="city_map")
+sel_data = st.plotly_chart(fig_map, on_select="rerun", selection_mode="points", width="stretch", key="city_map")
 
-# Default selection logic
 selected_city = "Gold Coast, Australia"
-sel_lat = -28.0167
-sel_lon = 153.4000
+sel_lat, sel_lon = -28.0167, 153.4000
 
 if sel_data and hasattr(sel_data, 'selection'):
     pts = sel_data.selection.get('points', [])
@@ -264,11 +205,8 @@ st.markdown('</div>', unsafe_allow_html=True)
 if not mdl:
     st.warning("Warning: Local analytical model missing. Using synthetic inferencer fallback.")
 
-
-# --- MAIN CONTENT ---
 c1, c2 = st.columns([6, 4])
 
-# Column 1: Spatial Map (Instant Iframe Rendering)
 with c1:
     st.markdown('<div class="modern-card">', unsafe_allow_html=True)
     st.subheader(f"Land Surface Temperature (LST) Distribution")
@@ -279,7 +217,6 @@ with c1:
     if gee_status:
         with st.spinner("Fetching Landsat 8 LST Satellite Data..."):
             f_map = gen_gee_map(selected_city, sel_lat, sel_lon, is_dp)
-            # CRITICAL FIX: Bypass slow WebSocket rendering with raw HTML iframe
             components.html(f_map.to_html(), height=500)
     else:
         st.markdown('<div class="disclaimer">Earth Engine Authentication Failed.</div>', unsafe_allow_html=True)
@@ -287,7 +224,6 @@ with c1:
         
     st.markdown('</div>', unsafe_allow_html=True)
 
-# Column 2: Predictive Analytics (Only for Deep-Dive)
 with c2:
     if is_dp:
         st.markdown('<div class="modern-card">', unsafe_allow_html=True)
@@ -299,33 +235,23 @@ with c2:
         sim_hol = st.radio("Holiday Season Surge?", [1, 0], format_func=lambda x: "Yes (Dec-Jan Peak)" if x==1 else "No (Standard Volume)", horizontal=True)
         
         tot_pax, vis_pax = run_ml_inf(mdl, sim_tmp, sim_hw, sim_hol)
-        
         st.markdown("<hr style='margin: 15px 0; border-color: #E2E8F0;'>", unsafe_allow_html=True)
         
         mc1, mc2 = st.columns(2)
         mc1.metric("Predicted Total ED Load", f"{tot_pax}", delta=f"{'+' if sim_hw else ''}{int(tot_pax*0.15)} (Heat Impact)" if sim_hw else "Baseline Climate")
         mc2.metric("Estimated Tourist Strain", f"{vis_pax}", delta=f"{(vis_pax/tot_pax)*100:.0f}% of Total Load")
         
-        # Professional Color Palette for Chart
         chart_colors = ['#2B6CB0', '#F6AD55']
         df_cht = pd.DataFrame({'Patient Demographics': ['Local Residents', 'Visiting Tourists'], 'Count': [tot_pax - vis_pax, vis_pax]})
         fig = px.pie(df_cht, values='Count', names='Patient Demographics', hole=0.65, color_discrete_sequence=chart_colors)
-        fig.update_layout(
-            margin=dict(t=20, b=20, l=0, r=0), 
-            paper_bgcolor='rgba(0,0,0,0)', 
-            plot_bgcolor='rgba(0,0,0,0)', 
-            font_color='#1A1A1A',
-            legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5)
-        )
-        st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
-        
+        fig.update_layout(margin=dict(t=20, b=20, l=0, r=0), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font_color='#1A1A1A', legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5))
+        st.plotly_chart(fig, width='stretch', config={'displayModeBar': False})
         st.markdown('</div>', unsafe_allow_html=True)
     else:
         st.markdown('<div class="modern-card">', unsafe_allow_html=True)
         st.info("The Predictive Analytics module requires high-resolution downscaled inputs. Please click on the red 'Gold Coast, Australia' pin on the map to activate the simulator.")
         st.markdown('</div>', unsafe_allow_html=True)
 
-# --- CMIP6 PROJECTIONS ---
 if is_dp:
     st.markdown('<div class="modern-card">', unsafe_allow_html=True)
     st.subheader("Future Climate Risk: CMIP6 Projection (2020 - 2050)")
@@ -336,13 +262,6 @@ if is_dp:
     
     fig2 = go.Figure()
     fig2.add_trace(go.Scatter(x=yrs, y=hw_dys, mode='lines+markers', name='Heatwave Days', line=dict(color='#E53E3E', width=2.5)))
-    fig2.update_layout(
-        paper_bgcolor='rgba(0,0,0,0)', 
-        plot_bgcolor='rgba(0,0,0,0)', 
-        font_color='#1A1A1A', 
-        xaxis_title="Projection Year", 
-        yaxis_title="Annual Days > 35°C",
-        margin=dict(t=10, b=10, l=10, r=10)
-    )
-    st.plotly_chart(fig2, use_container_width=True, config={'displayModeBar': False})
+    fig2.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font_color='#1A1A1A', xaxis_title="Projection Year", yaxis_title="Annual Days > 35°C", margin=dict(t=10, b=10, l=10, r=10))
+    st.plotly_chart(fig2, width='stretch', config={'displayModeBar': False})
     st.markdown('</div>', unsafe_allow_html=True)
