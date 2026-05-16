@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import ee
 import json
 from google.oauth2 import service_account
@@ -98,7 +99,6 @@ def init_ee():
     except Exception as e:
         return False, str(e)
 
-# CRITICAL FIX: Changed from cache_data to cache_resource to prevent Silent Hangs
 @st.cache_resource
 def load_ml_mdl():
     """Load RF model into persistent memory."""
@@ -108,9 +108,35 @@ def load_ml_mdl():
     return None
 
 def gen_gee_map(cty_name, lat, lon, is_dp):
-    """Generate geemap folium instance with professional basemaps."""
-    m = geemap.Map(center=[lat, lon], zoom=12 if is_dp else 10)
+    """Generate geemap with Actual Landsat 8 LST Satellite Layer."""
+    m = geemap.Map(center=[lat, lon], zoom=11 if is_dp else 10)
     m.add_basemap("CartoDB.Positron")
+    
+    try:
+        # Create a 20km buffer around the selected city
+        pt = ee.Geometry.Point([lon, lat])
+        roi = pt.buffer(20000) 
+        
+        # Fetch Landsat 8 LST (Median of Summer 2023 for stable visualization)
+        l8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2") \
+               .filterBounds(roi) \
+               .filterDate('2022-12-01', '2023-02-28') \
+               .filter(ee.Filter.lt('CLOUD_COVER', 30))
+               
+        if l8.size().getInfo() > 0:
+            lst_img = l8.median().select('ST_B10').multiply(0.00341802).add(149.0).subtract(273.15)
+            vis_params = {
+                'min': 25, 
+                'max': 45, 
+                'palette': ['#0000FF', '#00FFFF', '#00FF00', '#FFFF00', '#FF0000'],
+                'opacity': 0.7
+            }
+            m.addLayer(lst_img.clip(roi), vis_params, f'LST Heatmap ({cty_name})')
+            m.addLayer(ee.Image().paint(roi, 0, 2), {'palette': ['black']}, 'City Boundary')
+    except Exception as e:
+        print(f"GEE Layer Error: {e}")
+        pass
+        
     return m
 
 def run_ml_inf(mdl, tmp, is_hw, is_hol):
@@ -192,7 +218,7 @@ st.markdown('<div class="modern-card">', unsafe_allow_html=True)
 st.title("V-HEAT: Visitor-Health Extreme Analytics Tool")
 st.markdown('''
 <div class="disclaimer">
-    <b>Methodological Note:</b> As individual daily health records are subject to strict ethics clearance, this proof-of-concept utilizes mathematically downscaled AIHW annual aggregate data to demonstrate the analytical capabilities of the GeoAI pipeline. In a secure research environment, this architecture is designed to seamlessly ingest and process raw ICD-10 health records.
+    <b>System Architecture Note:</b> This dashboard acts as the presentation layer. The heavy-lifting processes (such as the AIHW data wrangling in <b>Pipeline 1</b> and the Random Forest 20m spatial downscaling in <b>Pipeline 2</b>) were pre-computed in isolated Python environments to ensure optimal dashboard performance. This interface utilizes publicly available AIHW annual aggregate data that was mathematically downscaled to demonstrate GeoAI capabilities.
 </div>
 ''', unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
@@ -203,7 +229,7 @@ mdl = load_ml_mdl()
 # --- GLOBAL DESTINATION SELECTOR (INTERACTIVE MAP) ---
 st.markdown('<div class="modern-card">', unsafe_allow_html=True)
 st.subheader("Global Destination Index")
-st.markdown("Select a city by clicking its pin on the map below to run the spatial and epidemiological pipeline.")
+st.markdown("Select a city by clicking its pin on the map below to retrieve the satellite heatmap and epidemiological pipeline.")
 
 fig_map = px.scatter_mapbox(
     df_cities, lat="Lat", lon="Lon", hover_name="City", custom_data=["City", "Lat", "Lon"],
@@ -242,18 +268,19 @@ if not mdl:
 # --- MAIN CONTENT ---
 c1, c2 = st.columns([6, 4])
 
-# Column 1: Spatial Map (Isolated GEE Loading)
+# Column 1: Spatial Map (Instant Iframe Rendering)
 with c1:
     st.markdown('<div class="modern-card">', unsafe_allow_html=True)
     st.subheader(f"Land Surface Temperature (LST) Distribution")
     
-    with st.spinner("Establishing secure connection to Earth Engine..."):
+    with st.spinner("Authenticating Earth Engine..."):
         gee_status, gee_msg = init_ee()
     
     if gee_status:
-        with st.spinner("Rendering Spatial Data..."):
+        with st.spinner("Fetching Landsat 8 LST Satellite Data..."):
             f_map = gen_gee_map(selected_city, sel_lat, sel_lon, is_dp)
-            f_map.to_streamlit(height=500)
+            # CRITICAL FIX: Bypass slow WebSocket rendering with raw HTML iframe
+            components.html(f_map.to_html(), height=500)
     else:
         st.markdown('<div class="disclaimer">Earth Engine Authentication Failed.</div>', unsafe_allow_html=True)
         st.error(f"Error Detail: {gee_msg}")
