@@ -76,7 +76,6 @@ if 'sim_temp' not in st.session_state:
 # =====================================================================
 @st.cache_resource(show_spinner=False)
 def init_ee():
-    # Menginisialisasi GEE dengan Token
     try:
         if "EARTHENGINE_TOKEN" in st.secrets:
             token_str = st.secrets["EARTHENGINE_TOKEN"].replace('\xa0', ' ').replace('\n', '').strip()
@@ -101,7 +100,6 @@ def load_ml_mdl():
 
 @st.cache_data(show_spinner=False)
 def get_real_cmip6_data(lat, lon, gee_ready):
-    # Mengekstrak proyeksi iklim dari NASA CMIP6
     if not gee_ready:
         yrs = np.arange(2025, 2051)
         return pd.DataFrame({'Year': yrs, 'Max_Temp': np.linspace(34.0, 39.5, len(yrs))})
@@ -132,7 +130,6 @@ def safe_stat(d, key):
 
 @st.cache_data(show_spinner=False)
 def gen_baseline_map(lat, lon, gee_ready):
-    # Membuat Peta Baseline 100m
     m = geemap.Map(center=[lat, lon], zoom=12, ee_initialize=False, draw_control=False, measure_control=False)
     m.add_basemap("CartoDB.Positron")
     stats_dict = {"min": 0.0, "mean": 0.0, "max": 0.0}
@@ -155,7 +152,6 @@ def gen_baseline_map(lat, lon, gee_ready):
                 
             lst_100m = l8.map(mask_l8).median().select('ST_B10').multiply(0.00341802).add(149.0).subtract(273.15).rename('LST')
             
-            # FIX: Filter Thermal Ekstrem (Membuang awan tinggi -47C dan atap pabrik 70C)
             valid_mask = lst_100m.gt(5).And(lst_100m.lt(55))
             lst_100m = lst_100m.updateMask(valid_mask)
             
@@ -176,16 +172,12 @@ def gen_baseline_map(lat, lon, gee_ready):
     return m.to_html(), stats_dict
 
 def run_rf_downscaling_split(lat, lon):
-    """
-    Menjalankan Spatial Downscaling & Menghasilkan SPLIT PANEL Peta terpotong (Clipped).
-    """
     try:
         pt = ee.Geometry.Point([lon, lat])
         roi = pt.buffer(8000)
         
         month_filter = ee.Filter.calendarRange(6, 8, 'month') if lat > 0 else ee.Filter.calendarRange(12, 2, 'month')
         
-        # 1. LANDSAT 8 (Target)
         l8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2").filterBounds(roi).filterDate('2021-01-01', '2024-12-31').filter(month_filter)
         def mask_l8(img):
             qa = img.select('QA_PIXEL')
@@ -193,38 +185,31 @@ def run_rf_downscaling_split(lat, lon):
             return img.updateMask(mask)
         lst_100m = l8.map(mask_l8).median().select('ST_B10').multiply(0.00341802).add(149.0).subtract(273.15).rename('LST')
         
-        # FIX: Filter Thermal Ekstrem untuk Data Training
         valid_mask = lst_100m.gt(5).And(lst_100m.lt(55))
         lst_100m = lst_100m.updateMask(valid_mask)
         
-        # 2. PREDICTOR: DEM (SRTM 30m)
         dem = ee.Image('USGS/SRTMGL1_003').clip(roi)
         elev = dem.select('elevation')
         slope = ee.Terrain.slope(elev).rename('Slope')
         aspect = ee.Terrain.aspect(elev).rename('Aspect')
         
-        # 3. PREDICTOR: Sentinel-2 Indices
         s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED').filterBounds(roi).filterDate('2021-01-01', '2024-12-31').filter(month_filter).filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)).median()
         ndvi = s2.normalizedDifference(['B8', 'B4']).rename('NDVI')
         ndbi = s2.normalizedDifference(['B11', 'B8']).rename('NDBI')
         ndwi = s2.normalizedDifference(['B3', 'B8']).rename('NDWI')
         
-        # 4. Compile Predictors
         predictors = ee.Image([ndvi, ndbi, ndwi, elev, slope, aspect])
         feat_names = ['NDVI', 'NDBI', 'NDWI', 'elevation', 'Slope', 'Aspect']
         
-        # 5. Train Random Forest
         training_img = lst_100m.addBands(predictors)
         training_pts = training_img.sample(region=roi, scale=100, numPixels=350, seed=42, geometries=False, dropNulls=True)
         rf_model = ee.Classifier.smileRandomForest(30).setOutputMode('REGRESSION').train(
             features=training_pts, classProperty='LST', inputProperties=feat_names
         )
         
-        # 6. Predict Downscaled 20m & Terapkan Mask yang sama
         lst_20m = predictors.classify(rf_model, 'Predicted_LST').updateMask(valid_mask)
         dict_imp = rf_model.explain().get('importance').getInfo()
         
-        # 7. Zonal Statistics Comparison
         reducer = ee.Reducer.mean().combine(ee.Reducer.max(), sharedInputs=True).combine(ee.Reducer.min(), sharedInputs=True)
         stats_100 = lst_100m.reduceRegion(reducer=reducer, geometry=roi, scale=100, maxPixels=1e9).getInfo()
         stats_20 = lst_20m.reduceRegion(reducer=reducer, geometry=roi, scale=20, maxPixels=1e9).getInfo()
@@ -234,19 +219,16 @@ def run_rf_downscaling_split(lat, lon):
             'd_min': safe_stat(stats_20, 'Predicted_LST_min'), 'd_mean': safe_stat(stats_20, 'Predicted_LST_mean'), 'd_max': safe_stat(stats_20, 'Predicted_LST_max')
         }
         
-        # 8. ML Metrics
         predicted_pts = training_pts.classify(rf_model, 'Predicted_LST')
         val_data = predicted_pts.reduceColumns(ee.Reducer.toList(2), ['LST', 'Predicted_LST']).get('list').getInfo()
         df_eval = pd.DataFrame(val_data, columns=['Actual', 'Predicted'])
         rmse = np.sqrt(mean_squared_error(df_eval['Actual'], df_eval['Predicted']))
         r2 = r2_score(df_eval['Actual'], df_eval['Predicted'])
         
-        # 9. SPLIT PANEL MAP (FIX: Clipped to ROI properly)
         m = geemap.Map(center=[lat, lon], zoom=12, ee_initialize=False, draw_control=False, measure_control=False)
         m.add_basemap("CartoDB.Positron")
         vis = {'min': 25, 'max': 45, 'palette': ['#ffffb2', '#fed976', '#feb24c', '#fd8d3c', '#fc4e2a', '#e31a1c', '#b10026'], 'opacity': 0.9}
         
-        # Terapkan clip(roi) sebelum mengambil URL agar petanya terpotong rapi
         left_url = lst_100m.clip(roi).getMapId(vis)['tile_fetcher'].url_format
         right_url = lst_20m.clip(roi).getMapId(vis)['tile_fetcher'].url_format
         
@@ -264,26 +246,36 @@ def run_rf_downscaling_split(lat, lon):
     except Exception as e:
         return None, str(e), None, None, None, None
 
-def run_ml_inf(mdl, tmp, is_hw, is_hol):
+def run_ml_inf(mdl, tmp, is_hw, is_hol, scale_factor=1.0):
+    """
+    ML Inference with Dynamic Demographic Scaling!
+    Menyesuaikan prediksi rumah sakit berdasarkan rasio volume turis kota terpilih terhadap kota Gold Coast (baseline model).
+    """
     if mdl:
         df_i = pd.DataFrame({'Mx_T': [tmp], 'Is_HW': [is_hw], 'Is_Hol': [is_hol]})
-        pd_pax = mdl.predict(df_i)[0]
+        pd_pax = mdl.predict(df_i)[0] * scale_factor
     else:
-        b = 850
-        pd_pax = b + ((tmp-25)*22) + (is_hw*120) + (is_hol*180)
+        b = 850 * scale_factor
+        pd_pax = b + ((tmp-25)*22*scale_factor) + (is_hw*120*scale_factor) + (is_hol*180*scale_factor)
     v_rto = 0.28 if is_hol else 0.12
     return int(pd_pax), int(pd_pax * v_rto)
 
 # =====================================================================
-# 4. DATABASE 50 DESTINASI GLOBAL (Out of the Box Update)
+# 4. DATABASE DESTINASI (Diperluas: Seluruh Kota Besar Australia)
 # =====================================================================
 cty_coords = [
-    # Oceania
+    # Australia (Primary Integration Target)
     {"City": "Gold Coast, Australia", "Lat": -28.0167, "Lon": 153.4000, "Tourists_M": 12.0, "Avg_Summer_LST": 34.5, "Continent": "Oceania"},
     {"City": "Brisbane, Australia", "Lat": -27.4705, "Lon": 153.0260, "Tourists_M": 8.0, "Avg_Summer_LST": 36.2, "Continent": "Oceania"},
     {"City": "Sydney, Australia", "Lat": -33.8688, "Lon": 151.2093, "Tourists_M": 16.0, "Avg_Summer_LST": 32.5, "Continent": "Oceania"},
     {"City": "Melbourne, Australia", "Lat": -37.8136, "Lon": 144.9631, "Tourists_M": 11.0, "Avg_Summer_LST": 31.0, "Continent": "Oceania"},
     {"City": "Perth, Australia", "Lat": -31.9505, "Lon": 115.8605, "Tourists_M": 5.0, "Avg_Summer_LST": 38.0, "Continent": "Oceania"},
+    {"City": "Adelaide, Australia", "Lat": -34.9285, "Lon": 138.6007, "Tourists_M": 3.0, "Avg_Summer_LST": 36.5, "Continent": "Oceania"},
+    {"City": "Canberra, Australia", "Lat": -35.2809, "Lon": 149.1300, "Tourists_M": 2.5, "Avg_Summer_LST": 32.0, "Continent": "Oceania"},
+    {"City": "Hobart, Australia", "Lat": -42.8821, "Lon": 147.3272, "Tourists_M": 1.5, "Avg_Summer_LST": 25.0, "Continent": "Oceania"},
+    {"City": "Darwin, Australia", "Lat": -12.4634, "Lon": 130.8456, "Tourists_M": 1.0, "Avg_Summer_LST": 33.0, "Continent": "Oceania"},
+    {"City": "Cairns, Australia", "Lat": -16.9186, "Lon": 145.7781, "Tourists_M": 2.8, "Avg_Summer_LST": 31.5, "Continent": "Oceania"},
+    # New Zealand
     {"City": "Auckland, New Zealand", "Lat": -36.8485, "Lon": 174.7633, "Tourists_M": 3.0, "Avg_Summer_LST": 24.5, "Continent": "Oceania"},
     {"City": "Queenstown, New Zealand", "Lat": -45.0312, "Lon": 168.6626, "Tourists_M": 1.5, "Avg_Summer_LST": 22.0, "Continent": "Oceania"},
     # Asia
@@ -335,7 +327,8 @@ cty_coords = [
     {"City": "Marrakech, Morocco", "Lat": 31.6295, "Lon": -7.9811, "Tourists_M": 3.0, "Avg_Summer_LST": 40.0, "Continent": "Africa"}
 ]
 df_cities = pd.DataFrame(cty_coords)
-df_cities['Type'] = np.where(df_cities['City'] == 'Gold Coast, Australia', 'Primary Study', 'Baseline')
+# Mengubah tag tipe lokasi berdasarkan asal negaranya
+df_cities['Type'] = np.where(df_cities['City'].str.contains('Australia'), 'Primary Study (AU)', 'Global Baseline')
 
 # =====================================================================
 # 5. APP LAYOUT & PRESENTATION LAYER
@@ -364,25 +357,23 @@ with tab_nav:
             st.rerun()
     with c_nav2:
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.session_state.selected_city == "Gold Coast, Australia":
+        if "Australia" in st.session_state.selected_city:
             st.markdown("**Status:** 🟢 Full Integration Active (Remote Sensing + Local Health Data + NASA CMIP6)")
         else:
             st.markdown("**Status:** 🔵 Partial Mode (Remote Sensing + NASA CMIP6 Only).")
     st.markdown('</div>', unsafe_allow_html=True)
 
-# TAB GLOBAL 50 CITIES CHART (Merespon Poin 5)
+# TAB GLOBAL 50 CITIES CHART
 with tab_global:
     st.markdown('<div class="modern-card">', unsafe_allow_html=True)
     st.markdown("### 📊 Global Tourism Vulnerability Matrix")
     st.markdown("Comparative analysis of 50 global destinations mapping tourist volume against extreme summer surface temperatures.")
     
-    # Interaktif Bubble Chart
-    fig_global = px.scatter(df_cities, x='Avg_Summer_LST', y='Tourists_M', size='Tourists_M', color='Continent', 
+    fig_global = px.scatter(df_cities, x='Avg_Summer_LST', y='Tourists_M', size='Tourists_M', color='Type', 
                             hover_name='City', size_max=40, opacity=0.7,
                             labels={'Avg_Summer_LST': 'Average Summer LST (°C)', 'Tourists_M': 'Annual Tourists (Millions)'},
-                            color_discrete_sequence=px.colors.qualitative.Prism)
+                            color_discrete_map={"Primary Study (AU)": "#E53E3E", "Global Baseline": "#3182CE"})
     fig_global.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=10, b=10, l=10, r=10), height=400)
-    # Garis kuadran risiko
     fig_global.add_hline(y=10, line_dash="dot", line_color="gray")
     fig_global.add_vline(x=35, line_dash="dot", line_color="red")
     fig_global.add_annotation(x=42, y=25, text="High Risk Zone", showarrow=False, font=dict(color="red", size=14))
@@ -392,7 +383,9 @@ with tab_global:
 
 city_row = df_cities[df_cities['City'] == st.session_state.selected_city].iloc[0]
 sel_lat, sel_lon = city_row['Lat'], city_row['Lon']
-is_dp = (st.session_state.selected_city == "Gold Coast, Australia")
+
+# OUT OF THE BOX: Unlock if the city is in Australia!
+is_dp = ("Australia" in st.session_state.selected_city)
 season_txt = "Jun-Aug" if sel_lat > 0 else "Dec-Feb"
 
 # --- MAIN DASHBOARD: THE 3 PILLARS ---
@@ -410,7 +403,6 @@ with c1:
             map_html, base_stats = gen_baseline_map(sel_lat, sel_lon, gee_status)
         components.html(map_html, height=430)
         
-        # Panel Statistik Eksternal
         st.markdown("##### 📍 Regional Baseline LST Panel (100m)")
         sc1, sc2, sc3 = st.columns(3)
         sc1.metric("Min Temp", f"{base_stats['min']} °C")
@@ -434,14 +426,11 @@ with c1:
                 map_html_rf, df_ev, rmse, r2, dict_imp, comp_stats = st.session_state.rf_results
                 
         if map_html_rf is not None:
-            # Peta Split Panel Folium
             components.html(map_html_rf, height=450)
             
-            # THE MAGIC: Perbandingan Statistik!
             st.markdown("##### 📊 LST Extracted Statistics: Native vs Downscaled")
             st.markdown('<span class="subtitle-text">Notice how the downscaled 20m model detects higher extreme localized temperatures (Hotspots) missed by the 100m baseline.</span>', unsafe_allow_html=True)
             
-            # Ini akan mengupdate sim_temp untuk Simulator di kanan!
             st.session_state.sim_temp = float(comp_stats['d_max'])
             
             s1, s2, s3 = st.columns(3)
@@ -485,7 +474,6 @@ with c2:
         fig2 = go.Figure(go.Scatter(x=df_cmip['Year'], y=df_cmip['Max_Temp'], mode='lines+markers', customdata=df_cmip['Max_Temp'], fill='tozeroy', fillcolor='rgba(229, 62, 62, 0.1)', line=dict(color='#E53E3E', width=3)))
         fig2.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font_color='#1E293B', yaxis_title="Max Air Temp (°C)", margin=dict(t=5, b=5, l=0, r=0), height=150)
         
-        # Interaktivitas CMIP6 dengan Loading Response
         cmip_sel = st.plotly_chart(fig2, on_select="rerun", selection_mode="points", use_container_width=True, key="cmip_chart")
         if cmip_sel and hasattr(cmip_sel, 'selection'):
             pts = cmip_sel.selection.get('points', [])
@@ -493,7 +481,6 @@ with c2:
                 new_temp = float(pts[0].get('customdata'))
                 if st.session_state.sim_temp != new_temp:
                     st.session_state.sim_temp = new_temp
-                    # Menambahkan Notifikasi Toast (Response Visual)
                     st.toast(f"Simulator updated to {new_temp:.1f}°C based on CMIP6 projection.", icon="✅")
         
         st.markdown("<hr style='margin: 25px 0; border-color: #E2E8F0;'>", unsafe_allow_html=True)
@@ -508,7 +495,11 @@ with c2:
         sim_hw = 1 if sim_tmp >= 35.0 else 0
         sim_hol = st.radio("Tourism Seasonality Exposure", [1, 0], format_func=lambda x: f"Peak Tourist Season ({season_txt})" if x==1 else "Off-Peak Season", horizontal=True)
         
-        tot_pax, vis_pax = run_ml_inf(mdl, sim_tmp, sim_hw, sim_hol)
+        # OUT OF THE BOX: Hitung rasio turis lokal terhadap baseline Gold Coast (12 Juta)
+        city_tourists = city_row['Tourists_M']
+        demographic_scale = city_tourists / 12.0
+        
+        tot_pax, vis_pax = run_ml_inf(mdl, sim_tmp, sim_hw, sim_hol, scale_factor=demographic_scale)
         
         mc1, mc2 = st.columns(2)
         mc1.metric("Est. Daily Hospital Cases", f"{tot_pax}", delta=f"{'+' if sim_hw else ''}{int(tot_pax*0.12)} (Heat Stress Burden)" if sim_hw else "Baseline", delta_color="inverse")
@@ -525,6 +516,6 @@ with c2:
     else:
         st.markdown('<div class="modern-card" style="height: 100%; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding: 40px;">', unsafe_allow_html=True)
         st.markdown("<h3>🔒 Simulator Locked</h3>", unsafe_allow_html=True)
-        st.markdown("<p style='color: #64748B;'>The Predictive Simulator requires localized historical health records to establish carrying capacity baselines. Currently, this PoC is trained exclusively on the <b>Gold Coast, Australia</b> pilot data.</p>", unsafe_allow_html=True)
-        st.info("Please select 'Gold Coast, Australia' from the dropdown to unlock the full integration.")
+        st.markdown("<p style='color: #64748B;'>The Predictive Simulator requires localized historical health records to establish carrying capacity baselines. Currently, this PoC is trained and unlocked for <b>all major cities in Australia</b>.</p>", unsafe_allow_html=True)
+        st.info("Please select an Australian city from the dropdown to unlock the full integration.")
         st.markdown('</div>', unsafe_allow_html=True)
