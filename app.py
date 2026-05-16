@@ -138,7 +138,7 @@ def gen_gee_map_and_stats(cty_name, lat, lon, gee_ready):
         pt = ee.Geometry.Point([lon, lat])
         roi = pt.buffer(12000) 
         
-        # LOGIKA HEMISFER: Utata (Jun-Aug) vs Selatan (Dec-Feb)
+        # LOGIKA HEMISFER: Utara (Jun-Aug) vs Selatan (Dec-Feb)
         if lat > 0:
             month_filter = ee.Filter.calendarRange(6, 8, 'month')
         else:
@@ -167,7 +167,7 @@ def gen_gee_map_and_stats(cty_name, lat, lon, gee_ready):
             m.addLayer(ee.Image().paint(roi, 0, 2), {'palette': ['#1E293B']}, 'Tourism Precinct')
             
             m.add_colorbar(vis_params, label="Surface Temperature (°C)", orientation="horizontal")
-            m.add_inspector()
+            # Removed m.add_inspector() to prevent Streamlit folium crash
     except Exception as e:
         print("L8 Error:", e)
         pass
@@ -234,7 +234,7 @@ def run_on_the_fly_downscaling(lat, lon):
         m.addLayer(lst_20m.clip(roi), vis, 'RF Downscaled LST 20m', True)
         m.addLayer(ee.Image().paint(roi, 0, 2), {'palette': ['#1E293B']}, 'Boundary')
         m.add_colorbar(vis, label="Surface Temperature (°C)", orientation="horizontal")
-        m.add_inspector()
+        # Removed m.add_inspector() to prevent Streamlit folium crash
         
         return m.to_html(), df_eval, rmse, r2, dict_imp
     except Exception as e:
