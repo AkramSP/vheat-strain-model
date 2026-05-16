@@ -54,9 +54,9 @@ def init_ee():
         # 1. OUT OF THE BOX METHOD: Use Personal Refresh Token to bypass GCP Service Account Firewall
         if "EARTHENGINE_TOKEN" in st.secrets:
             token_str = st.secrets["EARTHENGINE_TOKEN"]
-            # Clean invisible characters from copy-pasting
-            token_str = token_str.replace('\xa0', ' ').strip()
-            token_dict = json.loads(token_str)
+            # Clean invisible characters from copy-pasting & make parser robust
+            token_str = token_str.replace('\xa0', ' ').replace('\n', '').strip()
+            token_dict = json.loads(token_str, strict=False)
             
             # Construct Google OAuth2 Credentials manually from the refresh token
             from google.oauth2.credentials import Credentials
@@ -91,7 +91,9 @@ def load_ml_mdl():
 
 def gen_gee_map(cty_name, lat, lon, is_dp, gee_ready):
     """Generate map. Safely skips LST layer if GEE is not ready."""
-    m = geemap.Map(center=[lat, lon], zoom=11 if is_dp else 10)
+    # CRITICAL FIX: Add ee_initialize=False to prevent Geemap from blindly 
+    # attempting a secondary authentication and crashing on ghost files!
+    m = geemap.Map(center=[lat, lon], zoom=11 if is_dp else 10, ee_initialize=False)
     m.add_basemap("CartoDB.Positron")
     
     if not gee_ready:
