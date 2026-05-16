@@ -39,6 +39,8 @@ css = """
     h1, h2, h3 { font-weight: 600 !important; letter-spacing: -0.02em; color: #1A1A1A; }
     .metric-value { font-size: 2rem; font-weight: 700; color: #2B6CB0; }
     [data-testid="collapsedControl"] { display: none; }
+    /* Style for the debug box */
+    .debug-box { background-color: #FEFCBF; border: 1px solid #D69E2E; padding: 10px; border-radius: 5px; margin-bottom: 15px; color: #744210; font-size: 0.9em; }
 </style>
 """
 st.markdown(css, unsafe_allow_html=True)
@@ -46,7 +48,8 @@ st.markdown(css, unsafe_allow_html=True)
 # =====================================================================
 # 2. CORE FUNCTIONS (GEE & ML INFERENCE)
 # =====================================================================
-@st.cache_resource
+
+# Removed @st.cache_resource to force fresh secret reading during debugging
 def init_ee():
     """Securely init GEE exclusively using Streamlit Secrets. No Browser Auth allowed."""
     try:
@@ -66,9 +69,9 @@ def init_ee():
             return True, "Authenticated via Native GCP Secrets"
         else:
             # Fatal error handled gracefully without calling ee.Authenticate()
-            return False, "Google Service Account Secret Key (TOML) is missing from Streamlit settings. Map will run in offline mode."
+            return False, "Streamlit could not find 'gcp_service_account' in your Settings -> Secrets."
     except Exception as e:
-        return False, str(e)
+        return False, f"Authentication Error: {str(e)}"
 
 @st.cache_resource
 def load_ml_mdl():
@@ -94,7 +97,8 @@ def gen_gee_map(cty_name, lat, lon, is_dp, gee_ready):
             vis_params = {'min': 25, 'max': 45, 'palette': ['#0000FF', '#00FFFF', '#00FF00', '#FFFF00', '#FF0000'], 'opacity': 0.7}
             m.addLayer(lst_img.clip(roi), vis_params, f'LST Heatmap ({cty_name})')
             m.addLayer(ee.Image().paint(roi, 0, 2), {'palette': ['black']}, 'City Boundary')
-    except Exception:
+    except Exception as e:
+        print(f"GEE Map Generation Error: {e}")
         pass
     return m
 
@@ -176,6 +180,14 @@ st.markdown('''
     <b>System Architecture Note:</b> This dashboard acts as the presentation layer. The heavy-lifting processes (such as the AIHW data wrangling in <b>Pipeline 1</b> and the Random Forest 20m spatial downscaling in <b>Pipeline 2</b>) were pre-computed in isolated Python environments to ensure optimal dashboard performance. This interface utilizes publicly available AIHW annual aggregate data that was mathematically downscaled to demonstrate GeoAI capabilities.
 </div>
 ''', unsafe_allow_html=True)
+
+# --- SECRETS DEBUGGING UI ---
+# This block will display at the top of the app to help you verify Secrets are loaded
+if "gcp_service_account" in st.secrets:
+    st.markdown('<div class="debug-box">🔍 <b>Debug Info:</b> Streamlit successfully found the `gcp_service_account` key in your settings! GEE Authentication will proceed.</div>', unsafe_allow_html=True)
+else:
+    st.markdown('<div class="debug-box" style="background-color: #FED7D7; border-color: #E53E3E; color: #9B2C2C;">🚨 <b>Debug Info:</b> Streamlit CANNOT FIND the `gcp_service_account` key in your Settings -> Secrets. Check your TOML formatting.</div>', unsafe_allow_html=True)
+
 st.markdown('</div>', unsafe_allow_html=True)
 
 mdl = load_ml_mdl()
