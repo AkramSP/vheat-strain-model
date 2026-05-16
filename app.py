@@ -76,6 +76,7 @@ if 'sim_temp' not in st.session_state:
 # =====================================================================
 @st.cache_resource(show_spinner=False)
 def init_ee():
+    # Menginisialisasi GEE dengan Token
     try:
         if "EARTHENGINE_TOKEN" in st.secrets:
             token_str = st.secrets["EARTHENGINE_TOKEN"].replace('\xa0', ' ').replace('\n', '').strip()
@@ -100,6 +101,7 @@ def load_ml_mdl():
 
 @st.cache_data(show_spinner=False)
 def get_real_cmip6_data(lat, lon, gee_ready):
+    # Mengekstrak proyeksi iklim dari NASA CMIP6
     if not gee_ready:
         yrs = np.arange(2025, 2051)
         return pd.DataFrame({'Year': yrs, 'Max_Temp': np.linspace(34.0, 39.5, len(yrs))})
@@ -130,6 +132,7 @@ def safe_stat(d, key):
 
 @st.cache_data(show_spinner=False)
 def gen_baseline_map(lat, lon, gee_ready):
+    # Membuat Peta Baseline 100m
     m = geemap.Map(center=[lat, lon], zoom=12, ee_initialize=False, draw_control=False, measure_control=False)
     m.add_basemap("CartoDB.Positron")
     stats_dict = {"min": 0.0, "mean": 0.0, "max": 0.0}
@@ -152,6 +155,10 @@ def gen_baseline_map(lat, lon, gee_ready):
                 
             lst_100m = l8.map(mask_l8).median().select('ST_B10').multiply(0.00341802).add(149.0).subtract(273.15).rename('LST')
             
+            # FIX: Filter Thermal Ekstrem (Membuang awan tinggi -47C dan atap pabrik 70C)
+            valid_mask = lst_100m.gt(5).And(lst_100m.lt(55))
+            lst_100m = lst_100m.updateMask(valid_mask)
+            
             reducer = ee.Reducer.mean().combine(ee.Reducer.max(), sharedInputs=True).combine(ee.Reducer.min(), sharedInputs=True)
             stats = lst_100m.reduceRegion(reducer=reducer, geometry=roi, scale=100, maxPixels=1e9).getInfo()
             
@@ -170,8 +177,7 @@ def gen_baseline_map(lat, lon, gee_ready):
 
 def run_rf_downscaling_split(lat, lon):
     """
-    Menjalankan Spatial Downscaling & Menghasilkan SPLIT PANEL Peta.
-    Serta mengekstrak perbandingan statistik secara utuh.
+    Menjalankan Spatial Downscaling & Menghasilkan SPLIT PANEL Peta terpotong (Clipped).
     """
     try:
         pt = ee.Geometry.Point([lon, lat])
@@ -187,13 +193,17 @@ def run_rf_downscaling_split(lat, lon):
             return img.updateMask(mask)
         lst_100m = l8.map(mask_l8).median().select('ST_B10').multiply(0.00341802).add(149.0).subtract(273.15).rename('LST')
         
-        # 2. PREDICTOR: DEM (SRTM 30m) untuk Elevasi, Slope, Aspect
+        # FIX: Filter Thermal Ekstrem untuk Data Training
+        valid_mask = lst_100m.gt(5).And(lst_100m.lt(55))
+        lst_100m = lst_100m.updateMask(valid_mask)
+        
+        # 2. PREDICTOR: DEM (SRTM 30m)
         dem = ee.Image('USGS/SRTMGL1_003').clip(roi)
         elev = dem.select('elevation')
         slope = ee.Terrain.slope(elev).rename('Slope')
         aspect = ee.Terrain.aspect(elev).rename('Aspect')
         
-        # 3. PREDICTOR: Sentinel-2 Indices (NDVI, NDBI, NDWI)
+        # 3. PREDICTOR: Sentinel-2 Indices
         s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED').filterBounds(roi).filterDate('2021-01-01', '2024-12-31').filter(month_filter).filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)).median()
         ndvi = s2.normalizedDifference(['B8', 'B4']).rename('NDVI')
         ndbi = s2.normalizedDifference(['B11', 'B8']).rename('NDBI')
@@ -203,18 +213,18 @@ def run_rf_downscaling_split(lat, lon):
         predictors = ee.Image([ndvi, ndbi, ndwi, elev, slope, aspect])
         feat_names = ['NDVI', 'NDBI', 'NDWI', 'elevation', 'Slope', 'Aspect']
         
-        # 5. Train Random Forest Server-Side
+        # 5. Train Random Forest
         training_img = lst_100m.addBands(predictors)
         training_pts = training_img.sample(region=roi, scale=100, numPixels=350, seed=42, geometries=False, dropNulls=True)
         rf_model = ee.Classifier.smileRandomForest(30).setOutputMode('REGRESSION').train(
             features=training_pts, classProperty='LST', inputProperties=feat_names
         )
         
-        # 6. Predict Downscaled 20m & Importance
-        lst_20m = predictors.classify(rf_model, 'Predicted_LST')
+        # 6. Predict Downscaled 20m & Terapkan Mask yang sama
+        lst_20m = predictors.classify(rf_model, 'Predicted_LST').updateMask(valid_mask)
         dict_imp = rf_model.explain().get('importance').getInfo()
         
-        # 7. Zonal Statistics Comparison (The crucial insight!)
+        # 7. Zonal Statistics Comparison
         reducer = ee.Reducer.mean().combine(ee.Reducer.max(), sharedInputs=True).combine(ee.Reducer.min(), sharedInputs=True)
         stats_100 = lst_100m.reduceRegion(reducer=reducer, geometry=roi, scale=100, maxPixels=1e9).getInfo()
         stats_20 = lst_20m.reduceRegion(reducer=reducer, geometry=roi, scale=20, maxPixels=1e9).getInfo()
@@ -224,24 +234,24 @@ def run_rf_downscaling_split(lat, lon):
             'd_min': safe_stat(stats_20, 'Predicted_LST_min'), 'd_mean': safe_stat(stats_20, 'Predicted_LST_mean'), 'd_max': safe_stat(stats_20, 'Predicted_LST_max')
         }
         
-        # 8. ML Metrics Extraction
+        # 8. ML Metrics
         predicted_pts = training_pts.classify(rf_model, 'Predicted_LST')
         val_data = predicted_pts.reduceColumns(ee.Reducer.toList(2), ['LST', 'Predicted_LST']).get('list').getInfo()
         df_eval = pd.DataFrame(val_data, columns=['Actual', 'Predicted'])
         rmse = np.sqrt(mean_squared_error(df_eval['Actual'], df_eval['Predicted']))
         r2 = r2_score(df_eval['Actual'], df_eval['Predicted'])
         
-        # 9. GENERATE SPLIT PANEL MAP (Folium Native Integration)
+        # 9. SPLIT PANEL MAP (FIX: Clipped to ROI properly)
         m = geemap.Map(center=[lat, lon], zoom=12, ee_initialize=False, draw_control=False, measure_control=False)
         m.add_basemap("CartoDB.Positron")
         vis = {'min': 25, 'max': 45, 'palette': ['#ffffb2', '#fed976', '#feb24c', '#fd8d3c', '#fc4e2a', '#e31a1c', '#b10026'], 'opacity': 0.9}
         
-        # Ekstrak URL Tile GEE secara langsung untuk Folium SideBySide
-        left_url = lst_100m.getMapId(vis)['tile_fetcher'].url_format
-        right_url = lst_20m.getMapId(vis)['tile_fetcher'].url_format
+        # Terapkan clip(roi) sebelum mengambil URL agar petanya terpotong rapi
+        left_url = lst_100m.clip(roi).getMapId(vis)['tile_fetcher'].url_format
+        right_url = lst_20m.clip(roi).getMapId(vis)['tile_fetcher'].url_format
         
-        left_tile = folium.TileLayer(tiles=left_url, attr='Google Earth Engine', name='Native 100m', overlay=True, control=True)
-        right_tile = folium.TileLayer(tiles=right_url, attr='Google Earth Engine', name='Downscaled 20m', overlay=True, control=True)
+        left_tile = folium.TileLayer(tiles=left_url, attr='GEE', name='Native 100m', overlay=True, control=True)
+        right_tile = folium.TileLayer(tiles=right_url, attr='GEE', name='Downscaled 20m', overlay=True, control=True)
         
         left_tile.add_to(m)
         right_tile.add_to(m)
@@ -265,20 +275,67 @@ def run_ml_inf(mdl, tmp, is_hw, is_hol):
     return int(pd_pax), int(pd_pax * v_rto)
 
 # =====================================================================
-# 4. DATABASE DESTINASI
+# 4. DATABASE 50 DESTINASI GLOBAL (Out of the Box Update)
 # =====================================================================
 cty_coords = [
-    {"City": "Gold Coast, Australia", "Lat": -28.0167, "Lon": 153.4000},
-    {"City": "Brisbane, Australia", "Lat": -27.4705, "Lon": 153.0260},
-    {"City": "Sydney, Australia", "Lat": -33.8688, "Lon": 151.2093},
-    {"City": "Bali, Indonesia", "Lat": -8.4095, "Lon": 115.1889},
-    {"City": "Tokyo, Japan", "Lat": 35.6762, "Lon": 139.6503},
-    {"City": "Dubai, UAE", "Lat": 25.2048, "Lon": 55.2708},
-    {"City": "Rome, Italy", "Lat": 41.9028, "Lon": 12.4964},
-    {"City": "Paris, France", "Lat": 48.8566, "Lon": 2.3522},
-    {"City": "New York City, USA", "Lat": 40.7128, "Lon": -74.0060},
+    # Oceania
+    {"City": "Gold Coast, Australia", "Lat": -28.0167, "Lon": 153.4000, "Tourists_M": 12.0, "Avg_Summer_LST": 34.5, "Continent": "Oceania"},
+    {"City": "Brisbane, Australia", "Lat": -27.4705, "Lon": 153.0260, "Tourists_M": 8.0, "Avg_Summer_LST": 36.2, "Continent": "Oceania"},
+    {"City": "Sydney, Australia", "Lat": -33.8688, "Lon": 151.2093, "Tourists_M": 16.0, "Avg_Summer_LST": 32.5, "Continent": "Oceania"},
+    {"City": "Melbourne, Australia", "Lat": -37.8136, "Lon": 144.9631, "Tourists_M": 11.0, "Avg_Summer_LST": 31.0, "Continent": "Oceania"},
+    {"City": "Perth, Australia", "Lat": -31.9505, "Lon": 115.8605, "Tourists_M": 5.0, "Avg_Summer_LST": 38.0, "Continent": "Oceania"},
+    {"City": "Auckland, New Zealand", "Lat": -36.8485, "Lon": 174.7633, "Tourists_M": 3.0, "Avg_Summer_LST": 24.5, "Continent": "Oceania"},
+    {"City": "Queenstown, New Zealand", "Lat": -45.0312, "Lon": 168.6626, "Tourists_M": 1.5, "Avg_Summer_LST": 22.0, "Continent": "Oceania"},
+    # Asia
+    {"City": "Jakarta, Indonesia", "Lat": -6.2088, "Lon": 106.8456, "Tourists_M": 5.0, "Avg_Summer_LST": 35.0, "Continent": "Asia"},
+    {"City": "Bali, Indonesia", "Lat": -8.4095, "Lon": 115.1889, "Tourists_M": 6.5, "Avg_Summer_LST": 30.5, "Continent": "Asia"},
+    {"City": "Bangkok, Thailand", "Lat": 13.7563, "Lon": 100.5018, "Tourists_M": 22.7, "Avg_Summer_LST": 38.5, "Continent": "Asia"},
+    {"City": "Phuket, Thailand", "Lat": 7.8804, "Lon": 98.3922, "Tourists_M": 10.0, "Avg_Summer_LST": 32.0, "Continent": "Asia"},
+    {"City": "Singapore", "Lat": 1.3521, "Lon": 103.8198, "Tourists_M": 19.1, "Avg_Summer_LST": 34.0, "Continent": "Asia"},
+    {"City": "Kuala Lumpur, Malaysia", "Lat": 3.1390, "Lon": 101.6869, "Tourists_M": 13.8, "Avg_Summer_LST": 35.5, "Continent": "Asia"},
+    {"City": "Tokyo, Japan", "Lat": 35.6762, "Lon": 139.6503, "Tourists_M": 14.0, "Avg_Summer_LST": 36.5, "Continent": "Asia"},
+    {"City": "Kyoto, Japan", "Lat": 35.0116, "Lon": 135.7681, "Tourists_M": 8.0, "Avg_Summer_LST": 35.0, "Continent": "Asia"},
+    {"City": "Osaka, Japan", "Lat": 34.6937, "Lon": 135.5023, "Tourists_M": 11.5, "Avg_Summer_LST": 36.0, "Continent": "Asia"},
+    {"City": "Seoul, South Korea", "Lat": 37.5665, "Lon": 126.9780, "Tourists_M": 11.0, "Avg_Summer_LST": 34.5, "Continent": "Asia"},
+    {"City": "Taipei, Taiwan", "Lat": 25.0330, "Lon": 121.5654, "Tourists_M": 9.5, "Avg_Summer_LST": 36.0, "Continent": "Asia"},
+    {"City": "Hong Kong, SAR China", "Lat": 22.3193, "Lon": 114.1694, "Tourists_M": 29.0, "Avg_Summer_LST": 35.5, "Continent": "Asia"},
+    {"City": "Dubai, UAE", "Lat": 25.2048, "Lon": 55.2708, "Tourists_M": 16.7, "Avg_Summer_LST": 45.0, "Continent": "Asia"},
+    {"City": "Riyadh, Saudi Arabia", "Lat": 24.7136, "Lon": 46.6753, "Tourists_M": 5.5, "Avg_Summer_LST": 44.5, "Continent": "Asia"},
+    {"City": "Mumbai, India", "Lat": 19.0760, "Lon": 72.8777, "Tourists_M": 6.0, "Avg_Summer_LST": 35.0, "Continent": "Asia"},
+    {"City": "Delhi, India", "Lat": 28.7041, "Lon": 77.1025, "Tourists_M": 5.5, "Avg_Summer_LST": 42.0, "Continent": "Asia"},
+    # Europe
+    {"City": "Istanbul, Turkey", "Lat": 41.0082, "Lon": 28.9784, "Tourists_M": 14.7, "Avg_Summer_LST": 33.5, "Continent": "Europe"},
+    {"City": "Rome, Italy", "Lat": 41.9028, "Lon": 12.4964, "Tourists_M": 10.0, "Avg_Summer_LST": 36.0, "Continent": "Europe"},
+    {"City": "Venice, Italy", "Lat": 45.4408, "Lon": 12.3155, "Tourists_M": 5.5, "Avg_Summer_LST": 32.5, "Continent": "Europe"},
+    {"City": "Milan, Italy", "Lat": 45.4642, "Lon": 9.1900, "Tourists_M": 6.5, "Avg_Summer_LST": 35.0, "Continent": "Europe"},
+    {"City": "Paris, France", "Lat": 48.8566, "Lon": 2.3522, "Tourists_M": 19.0, "Avg_Summer_LST": 33.0, "Continent": "Europe"},
+    {"City": "Barcelona, Spain", "Lat": 41.3851, "Lon": 2.1734, "Tourists_M": 9.0, "Avg_Summer_LST": 34.0, "Continent": "Europe"},
+    {"City": "Madrid, Spain", "Lat": 40.4168, "Lon": -3.7038, "Tourists_M": 7.5, "Avg_Summer_LST": 38.5, "Continent": "Europe"},
+    {"City": "Athens, Greece", "Lat": 37.9838, "Lon": 23.7275, "Tourists_M": 6.0, "Avg_Summer_LST": 39.0, "Continent": "Europe"},
+    {"City": "Lisbon, Portugal", "Lat": 38.7223, "Lon": -9.1393, "Tourists_M": 4.5, "Avg_Summer_LST": 34.5, "Continent": "Europe"},
+    {"City": "London, UK", "Lat": 51.5074, "Lon": -0.1278, "Tourists_M": 19.5, "Avg_Summer_LST": 28.0, "Continent": "Europe"},
+    {"City": "Amsterdam, Netherlands", "Lat": 52.3676, "Lon": 4.9041, "Tourists_M": 8.5, "Avg_Summer_LST": 27.5, "Continent": "Europe"},
+    {"City": "Berlin, Germany", "Lat": 52.5200, "Lon": 13.4050, "Tourists_M": 6.0, "Avg_Summer_LST": 29.0, "Continent": "Europe"},
+    {"City": "Vienna, Austria", "Lat": 48.2082, "Lon": 16.3738, "Tourists_M": 6.5, "Avg_Summer_LST": 30.5, "Continent": "Europe"},
+    {"City": "Zurich, Switzerland", "Lat": 47.3769, "Lon": 8.5417, "Tourists_M": 3.5, "Avg_Summer_LST": 28.0, "Continent": "Europe"},
+    {"City": "Prague, Czechia", "Lat": 50.0755, "Lon": 14.4378, "Tourists_M": 9.0, "Avg_Summer_LST": 29.5, "Continent": "Europe"},
+    # Americas
+    {"City": "New York City, USA", "Lat": 40.7128, "Lon": -74.0060, "Tourists_M": 13.5, "Avg_Summer_LST": 34.0, "Continent": "Americas"},
+    {"City": "Los Angeles, USA", "Lat": 34.0522, "Lon": -118.2437, "Tourists_M": 8.5, "Avg_Summer_LST": 35.5, "Continent": "Americas"},
+    {"City": "Las Vegas, USA", "Lat": 36.1699, "Lon": -115.1398, "Tourists_M": 6.5, "Avg_Summer_LST": 42.0, "Continent": "Americas"},
+    {"City": "Miami, USA", "Lat": 25.7617, "Lon": -80.1918, "Tourists_M": 8.0, "Avg_Summer_LST": 35.0, "Continent": "Americas"},
+    {"City": "Honolulu, USA", "Lat": 21.3069, "Lon": -157.8583, "Tourists_M": 3.0, "Avg_Summer_LST": 31.0, "Continent": "Americas"},
+    {"City": "Toronto, Canada", "Lat": 43.6510, "Lon": -79.3470, "Tourists_M": 4.5, "Avg_Summer_LST": 29.5, "Continent": "Americas"},
+    {"City": "Cancun, Mexico", "Lat": 21.1619, "Lon": -86.8515, "Tourists_M": 6.0, "Avg_Summer_LST": 34.5, "Continent": "Americas"},
+    {"City": "Rio de Janeiro, Brazil", "Lat": -22.9068, "Lon": -43.1729, "Tourists_M": 2.5, "Avg_Summer_LST": 36.0, "Continent": "Americas"},
+    {"City": "Buenos Aires, Argentina", "Lat": -34.6037, "Lon": -58.3816, "Tourists_M": 3.0, "Avg_Summer_LST": 34.0, "Continent": "Americas"},
+    # Africa
+    {"City": "Cape Town, South Africa", "Lat": -33.9249, "Lon": 18.4241, "Tourists_M": 1.5, "Avg_Summer_LST": 32.0, "Continent": "Africa"},
+    {"City": "Cairo, Egypt", "Lat": 30.0444, "Lon": 31.2357, "Tourists_M": 6.0, "Avg_Summer_LST": 41.5, "Continent": "Africa"},
+    {"City": "Marrakech, Morocco", "Lat": 31.6295, "Lon": -7.9811, "Tourists_M": 3.0, "Avg_Summer_LST": 40.0, "Continent": "Africa"}
 ]
 df_cities = pd.DataFrame(cty_coords)
+df_cities['Type'] = np.where(df_cities['City'] == 'Gold Coast, Australia', 'Primary Study', 'Baseline')
 
 # =====================================================================
 # 5. APP LAYOUT & PRESENTATION LAYER
@@ -291,24 +348,47 @@ st.markdown('</div>', unsafe_allow_html=True)
 mdl = load_ml_mdl()
 gee_status = init_ee()
 
-# --- NAVIGATOR ---
-st.markdown('<div class="modern-card" style="padding: 20px 25px;">', unsafe_allow_html=True)
-c_nav1, c_nav2 = st.columns([1, 3])
-with c_nav1:
-    curr_idx = df_cities['City'].tolist().index(st.session_state.selected_city) if st.session_state.selected_city in df_cities['City'].tolist() else 0
-    new_city = st.selectbox("Select Tourism Precinct:", df_cities['City'].tolist(), index=curr_idx)
-    if new_city != st.session_state.selected_city:
-        st.session_state.selected_city = new_city
-        st.session_state.rf_downscale_run = False 
-        st.session_state.rf_results = None
-        st.rerun()
-with c_nav2:
-    st.markdown("<br>", unsafe_allow_html=True)
-    if st.session_state.selected_city == "Gold Coast, Australia":
-        st.markdown("**Status:** 🟢 Full Integration Active (Remote Sensing + Local Health Data + NASA CMIP6)")
-    else:
-        st.markdown("**Status:** 🔵 Partial Mode (Remote Sensing + NASA CMIP6 Only).")
-st.markdown('</div>', unsafe_allow_html=True)
+# --- NAVIGATOR TABS ---
+tab_nav, tab_global = st.tabs(["📍 Local Precinct Analysis", "🌍 Global Destination Vulnerability Index"])
+
+with tab_nav:
+    st.markdown('<div class="modern-card" style="padding: 20px 25px;">', unsafe_allow_html=True)
+    c_nav1, c_nav2 = st.columns([1, 3])
+    with c_nav1:
+        curr_idx = df_cities['City'].tolist().index(st.session_state.selected_city) if st.session_state.selected_city in df_cities['City'].tolist() else 0
+        new_city = st.selectbox("Select Tourism Precinct (50 Cities):", df_cities['City'].tolist(), index=curr_idx)
+        if new_city != st.session_state.selected_city:
+            st.session_state.selected_city = new_city
+            st.session_state.rf_downscale_run = False 
+            st.session_state.rf_results = None
+            st.rerun()
+    with c_nav2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.session_state.selected_city == "Gold Coast, Australia":
+            st.markdown("**Status:** 🟢 Full Integration Active (Remote Sensing + Local Health Data + NASA CMIP6)")
+        else:
+            st.markdown("**Status:** 🔵 Partial Mode (Remote Sensing + NASA CMIP6 Only).")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# TAB GLOBAL 50 CITIES CHART (Merespon Poin 5)
+with tab_global:
+    st.markdown('<div class="modern-card">', unsafe_allow_html=True)
+    st.markdown("### 📊 Global Tourism Vulnerability Matrix")
+    st.markdown("Comparative analysis of 50 global destinations mapping tourist volume against extreme summer surface temperatures.")
+    
+    # Interaktif Bubble Chart
+    fig_global = px.scatter(df_cities, x='Avg_Summer_LST', y='Tourists_M', size='Tourists_M', color='Continent', 
+                            hover_name='City', size_max=40, opacity=0.7,
+                            labels={'Avg_Summer_LST': 'Average Summer LST (°C)', 'Tourists_M': 'Annual Tourists (Millions)'},
+                            color_discrete_sequence=px.colors.qualitative.Prism)
+    fig_global.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=10, b=10, l=10, r=10), height=400)
+    # Garis kuadran risiko
+    fig_global.add_hline(y=10, line_dash="dot", line_color="gray")
+    fig_global.add_vline(x=35, line_dash="dot", line_color="red")
+    fig_global.add_annotation(x=42, y=25, text="High Risk Zone", showarrow=False, font=dict(color="red", size=14))
+    
+    st.plotly_chart(fig_global, use_container_width=True, config={'displayModeBar': False})
+    st.markdown('</div>', unsafe_allow_html=True)
 
 city_row = df_cities[df_cities['City'] == st.session_state.selected_city].iloc[0]
 sel_lat, sel_lon = city_row['Lat'], city_row['Lon']
@@ -405,12 +485,16 @@ with c2:
         fig2 = go.Figure(go.Scatter(x=df_cmip['Year'], y=df_cmip['Max_Temp'], mode='lines+markers', customdata=df_cmip['Max_Temp'], fill='tozeroy', fillcolor='rgba(229, 62, 62, 0.1)', line=dict(color='#E53E3E', width=3)))
         fig2.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font_color='#1E293B', yaxis_title="Max Air Temp (°C)", margin=dict(t=5, b=5, l=0, r=0), height=150)
         
-        # Interaktivitas CMIP6 yang Murni dan Fungsional
+        # Interaktivitas CMIP6 dengan Loading Response
         cmip_sel = st.plotly_chart(fig2, on_select="rerun", selection_mode="points", use_container_width=True, key="cmip_chart")
         if cmip_sel and hasattr(cmip_sel, 'selection'):
             pts = cmip_sel.selection.get('points', [])
             if pts and len(pts) > 0:
-                st.session_state.sim_temp = float(pts[0].get('customdata'))
+                new_temp = float(pts[0].get('customdata'))
+                if st.session_state.sim_temp != new_temp:
+                    st.session_state.sim_temp = new_temp
+                    # Menambahkan Notifikasi Toast (Response Visual)
+                    st.toast(f"Simulator updated to {new_temp:.1f}°C based on CMIP6 projection.", icon="✅")
         
         st.markdown("<hr style='margin: 25px 0; border-color: #E2E8F0;'>", unsafe_allow_html=True)
         
