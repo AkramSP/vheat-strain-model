@@ -48,9 +48,15 @@ st.markdown(css, unsafe_allow_html=True)
 # =====================================================================
 @st.cache_resource
 def init_ee():
-    """Securely init GEE explicitly without browser fallback."""
+    """Securely init GEE exclusively using Streamlit Secrets. No Browser Auth allowed."""
     try:
         scp = ['https://www.googleapis.com/auth/earthengine']
+        
+        # Check if running locally (e.g., Colab or local machine) vs Streamlit Cloud
+        if os.environ.get('STREAMLIT_RUNTIME_ENV') is None and 'gcp_service_account' not in st.secrets:
+            ee.Initialize() # Only fallback to local auth if NOT on Streamlit Cloud
+            return True, "Authenticated via Local Default Credentials"
+            
         if "gcp_service_account" in st.secrets:
             key_dict = dict(st.secrets["gcp_service_account"])
             if '\\n' in key_dict['private_key']:
@@ -59,9 +65,8 @@ def init_ee():
             ee.Initialize(credentials=creds, project=key_dict.get('project_id'))
             return True, "Authenticated via Native GCP Secrets"
         else:
-            # FATAL UX FIX: DO NOT fallback to ee.Initialize() without creds on Streamlit Cloud
-            # It causes infinite hanging trying to launch a browser!
-            return False, "Google Service Account Secret Key (TOML) is missing from Streamlit settings."
+            # Fatal error handled gracefully without calling ee.Authenticate()
+            return False, "Google Service Account Secret Key (TOML) is missing from Streamlit settings. Map will run in offline mode."
     except Exception as e:
         return False, str(e)
 
@@ -72,9 +77,14 @@ def load_ml_mdl():
         return joblib.load(p)
     return None
 
-def gen_gee_map(cty_name, lat, lon, is_dp):
+def gen_gee_map(cty_name, lat, lon, is_dp, gee_ready):
+    """Generate map. Safely skips LST layer if GEE is not ready."""
     m = geemap.Map(center=[lat, lon], zoom=11 if is_dp else 10)
     m.add_basemap("CartoDB.Positron")
+    
+    if not gee_ready:
+        return m # Return basic map immediately if auth failed
+        
     try:
         pt = ee.Geometry.Point([lon, lat])
         roi = pt.buffer(20000) 
@@ -214,13 +224,12 @@ with c1:
     with st.spinner("Authenticating Earth Engine..."):
         gee_status, gee_msg = init_ee()
     
-    if gee_status:
-        with st.spinner("Fetching Landsat 8 LST Satellite Data..."):
-            f_map = gen_gee_map(selected_city, sel_lat, sel_lon, is_dp)
-            components.html(f_map.to_html(), height=500)
-    else:
-        st.markdown('<div class="disclaimer">Earth Engine Authentication Failed.</div>', unsafe_allow_html=True)
-        st.error(f"Error Detail: {gee_msg}")
+    if not gee_status:
+         st.warning(f"⚠️ Earth Engine Authentication Pending/Failed. Displaying base map without LST layer. Detail: {gee_msg}")
+    
+    with st.spinner("Rendering Map View..."):
+        f_map = gen_gee_map(selected_city, sel_lat, sel_lon, is_dp, gee_status)
+        components.html(f_map.to_html(), height=500)
         
     st.markdown('</div>', unsafe_allow_html=True)
 
