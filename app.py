@@ -62,6 +62,9 @@ st.markdown(css, unsafe_allow_html=True)
 def init_ee():
     """Securely init GEE using Streamlit Native Secrets or Local Auth."""
     try:
+        # Mandatory OAuth Scope for Earth Engine API
+        scp = ['https://www.googleapis.com/auth/earthengine']
+        
         # 1. Bulletproof Method: Native Streamlit TOML Dictionary
         if "gcp_service_account" in st.secrets:
             key_dict = dict(st.secrets["gcp_service_account"])
@@ -70,7 +73,7 @@ def init_ee():
             if '\\n' in key_dict['private_key']:
                 key_dict['private_key'] = key_dict['private_key'].replace('\\n', '\n')
                 
-            creds = service_account.Credentials.from_service_account_info(key_dict)
+            creds = service_account.Credentials.from_service_account_info(key_dict).with_scopes(scp)
             ee.Initialize(credentials=creds)
             return True, "Authenticated via Native GCP Secrets"
             
@@ -84,7 +87,7 @@ def init_ee():
             else:
                 key_dict = dict(token)
                 
-            creds = service_account.Credentials.from_service_account_info(key_dict)
+            creds = service_account.Credentials.from_service_account_info(key_dict).with_scopes(scp)
             ee.Initialize(credentials=creds)
             return True, "Authenticated via Legacy JSON Secrets"
             
