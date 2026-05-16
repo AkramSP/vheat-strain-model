@@ -49,7 +49,6 @@ st.markdown(css, unsafe_allow_html=True)
 # 2. CORE FUNCTIONS (GEE & ML INFERENCE)
 # =====================================================================
 
-# Removed @st.cache_resource to force fresh secret reading during debugging
 def init_ee():
     """Securely init GEE exclusively using Streamlit Secrets. No Browser Auth allowed."""
     try:
@@ -64,11 +63,19 @@ def init_ee():
             key_dict = dict(st.secrets["gcp_service_account"])
             if '\\n' in key_dict['private_key']:
                 key_dict['private_key'] = key_dict['private_key'].replace('\\n', '\n')
+            
+            # Create the credentials object
             creds = service_account.Credentials.from_service_account_info(key_dict).with_scopes(scp)
+            
+            # CRITICAL FIX: FORCE GEE to use these credentials and ONLY these.
+            # This prevents GEE from falling back to ee.Authenticate() if it finds ghost credentials.
+            ee.data.setCredentials(creds)
+            
+            # Initialize with the project ID
             ee.Initialize(credentials=creds, project=key_dict.get('project_id'))
+            
             return True, "Authenticated via Native GCP Secrets"
         else:
-            # Fatal error handled gracefully without calling ee.Authenticate()
             return False, "Streamlit could not find 'gcp_service_account' in your Settings -> Secrets."
     except Exception as e:
         return False, f"Authentication Error: {str(e)}"
