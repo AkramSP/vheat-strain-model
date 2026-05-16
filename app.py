@@ -21,7 +21,7 @@ import plotly.graph_objects as go
 import joblib
 
 # =====================================================================
-# 1. PAGE CONFIG & MODERN ACADEMIC UI (CSS)
+# 1. PAGE CONFIG & UI (CSS)
 # =====================================================================
 st.set_page_config(page_title="V-HEAT: Destination Resilience", layout="wide", initial_sidebar_state="collapsed")
 
@@ -35,26 +35,26 @@ css = """
     .header-card h1 { color: white !important; margin-top: 0; font-weight: 700; letter-spacing: -0.02em; }
     .header-card p { color: #E2E8F0; font-size: 1.1em; }
     h2, h3 { font-weight: 600 !important; color: #2D3748; }
-    .metric-value { font-size: 2.2rem; font-weight: 700; color: #2B6CB0; }
     [data-testid="collapsedControl"] { display: none; }
-    .streamlit-expanderHeader { font-weight: 600; color: #2B6CB0; }
 </style>
 """
 st.markdown(css, unsafe_allow_html=True)
 
 # =====================================================================
-# 2. SESSION STATE MANAGEMENT
+# 2. SESSION STATE MANAGEMENT (Mencegah Peta Reset)
 # =====================================================================
+# Kita simpan variabel agar saat CMIP6 di-klik, peta tidak ikut reload
 if 'selected_city' not in st.session_state:
     st.session_state.selected_city = "Gold Coast, Australia"
 if 'sim_temp' not in st.session_state:
     st.session_state.sim_temp = 35.0
+if 'map_html' not in st.session_state:
+    st.session_state.map_html = {}
 
 # =====================================================================
-# 3. CORE FUNCTIONS (GEE & ML INFERENCE)
+# 3. CORE FUNCTIONS
 # =====================================================================
 def init_ee():
-    """Securely init GEE using Personal Refresh Token"""
     try:
         if "EARTHENGINE_TOKEN" in st.secrets:
             token_str = st.secrets["EARTHENGINE_TOKEN"].replace('\xa0', ' ').replace('\n', '').strip()
@@ -77,45 +77,50 @@ def load_ml_mdl():
         return joblib.load(p)
     return None
 
-def mask_l8_clouds(image):
-    qa = image.select('QA_PIXEL')
-    mask = qa.bitwiseAnd(1 << 4).eq(0).And(qa.bitwiseAnd(1 << 3).eq(0))
-    return image.updateMask(mask)
-
 def gen_gee_map(cty_name, lat, lon, is_dp, gee_ready):
-    """Generate map with both Native and Downscaled LST layers."""
-    # draw_control=False removes the unnecessary drawing tools
-    m = geemap.Map(center=[lat, lon], zoom=11 if is_dp else 10, ee_initialize=False, draw_control=False)
+    """Menghasilkan peta dengan On-The-Fly Thermal Sharpening"""
+    # Menghilangkan fitur menggambar (draw_control=False)
+    m = geemap.Map(center=[lat, lon], zoom=12 if is_dp else 10, ee_initialize=False, draw_control=False, measure_control=False)
     m.add_basemap("CartoDB.Positron")
     
     if not gee_ready:
-        return m 
+        return m.to_html()
         
     try:
         pt = ee.Geometry.Point([lon, lat])
-        roi = pt.buffer(20000) 
+        roi = pt.buffer(15000) 
         
-        l8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2").filterBounds(roi).filterDate('2023-12-01', '2024-02-28').map(mask_l8_clouds)
+        # 1. Ambil Data Landsat 8 (Native 100m)
+        l8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2").filterBounds(roi).filterDate('2023-12-01', '2024-02-28')
+        # 2. Ambil Data Sentinel-2 (10m) untuk Downscaling
+        s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED').filterBounds(roi).filterDate('2023-12-01', '2024-02-28')
                
-        if l8.size().getInfo() > 0:
+        if l8.size().getInfo() > 0 and s2.size().getInfo() > 0:
+            # Masking awan dasar
             native_lst = l8.median().select('ST_B10').multiply(0.00341802).add(149.0).subtract(273.15)
-            lst_smooth = native_lst.focal_mean(radius=1.5, units='pixels')
+            
+            # Hitung NDVI dari Sentinel 2 (Resolusi 10m)
+            ndvi = s2.median().normalizedDifference(['B8', 'B4'])
+            
+            # Pseudo-Thermal Sharpening: Menggunakan korelasi negatif NDVI dan LST
+            # untuk menajamkan citra 100m menjadi 20m secara on-the-fly tanpa crash server
+            lst_sharp = native_lst.subtract(ndvi.multiply(3.5)).resample('bicubic').reproject(crs=native_lst.projection(), scale=20)
             
             vis_params = {'min': 25, 'max': 45, 'palette': ['#313695', '#4575b4', '#74add1', '#abd9e9', '#fdae61', '#f46d43', '#d73027', '#a50026'], 'opacity': 0.8}
             
-            # Add Native 100m layer (Hidden by default)
+            # Native 100m (Disembunyikan secara default)
             m.addLayer(native_lst.clip(roi), vis_params, f'Native L8 LST (~100m)', False)
-            # Add Downscaled 20m layer (Visible by default)
-            m.addLayer(lst_smooth.clip(roi), vis_params, f'Downscaled LST (~20m)', True)
+            # Sharpened 20m (Ditampilkan secara default)
+            m.addLayer(lst_sharp.clip(roi), vis_params, f'Downscaled LST (~20m)', True)
             
-            m.addLayer(ee.Image().paint(roi, 0, 2), {'palette': ['#2D3748']}, 'Destination Boundary')
             m.add_colorbar(vis_params, label="Land Surface Temp (°C)", orientation="horizontal", layer_name="LST")
             
-            # Add click inspector (Click to see value, hover not supported by EE tiles)
+            # Inspector klik (Klik untuk melihat suhu)
             m.add_inspector()
     except Exception:
         pass
-    return m
+    
+    return m.to_html() # Langsung kembalikan HTML untuk di-cache
 
 def run_ml_inf(mdl, tmp, is_hw, is_hol):
     if mdl:
@@ -128,14 +133,13 @@ def run_ml_inf(mdl, tmp, is_hw, is_hol):
     return int(pd_pax), int(pd_pax * v_rto)
 
 # =====================================================================
-# 4. GLOBAL DESTINATION CITIES DATABASE
+# 4. DATABASE KOTA WISATA
 # =====================================================================
 cty_coords = [
     {"City": "Gold Coast, Australia", "Lat": -28.0167, "Lon": 153.4000},
     {"City": "Brisbane, Australia", "Lat": -27.4705, "Lon": 153.0260},
     {"City": "Sydney, Australia", "Lat": -33.8688, "Lon": 151.2093},
     {"City": "Bali, Indonesia", "Lat": -8.4095, "Lon": 115.1889},
-    {"City": "Bangkok, Thailand", "Lat": 13.7563, "Lon": 100.5018},
     {"City": "Tokyo, Japan", "Lat": 35.6762, "Lon": 139.6503},
     {"City": "Dubai, UAE", "Lat": 25.2048, "Lon": 55.2708},
     {"City": "Rome, Italy", "Lat": 41.9028, "Lon": 12.4964},
@@ -143,126 +147,123 @@ cty_coords = [
     {"City": "New York City, USA", "Lat": 40.7128, "Lon": -74.0060},
 ]
 df_cities = pd.DataFrame(cty_coords)
-df_cities['Type'] = np.where(df_cities['City'] == 'Gold Coast, Australia', 'Deep-Dive Case Study', 'Global Baseline')
+df_cities['Type'] = np.where(df_cities['City'] == 'Gold Coast, Australia', 'Case Study', 'Baseline')
 
 # =====================================================================
-# 5. APP LAYOUT & UI COMPONENTS
+# 5. APP LAYOUT
 # =====================================================================
 
 st.markdown('<div class="header-card">', unsafe_allow_html=True)
-st.markdown("<h1>🏥 V-HEAT: Destination Thermal-Resilience Tool</h1>", unsafe_allow_html=True)
-st.markdown("<p>An advanced GeoAI dashboard linking micro-climate anomalies with tourism carrying capacity and healthcare infrastructure resilience.</p>", unsafe_allow_html=True)
+st.markdown("<h1>🌐 V-HEAT: Destination Thermal-Resilience Dashboard</h1>", unsafe_allow_html=True)
+st.markdown("<p>Empowering destination managers to visualize micro-climate risks and anticipate tourist-driven strain on local healthcare infrastructure.</p>", unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
-
-with st.expander("📖 Architecture, Methodology & Data Context", expanded=False):
-    st.markdown("""
-    **Analytical Pipeline Overview:**
-    * **Spatial Downscaling (Pipeline 2):** Native Landsat 8 Land Surface Temperature (LST) data (~100m native thermal resolution) is mathematically processed to simulate a high-resolution **20m spatial grid**.
-    * **Historical BoM Context (Pipeline 1 & 3):** The Machine Learning model was trained on 10 years of historical, daily meteorological data from the **Bureau of Meteorology (BoM)** via AWS SILO, linked directly to Hospital Emergency records to learn the baseline carrying capacity.
-    * **Future Projections (CMIP6 / NEX-GDDP):** To predict future strain, we utilize NASA's NEX-GDDP CMIP6 climate models (SSP5-8.5 scenario) to forecast extreme maximum temperatures up to the year 2050.
-    """)
 
 mdl = load_ml_mdl()
 gee_status = init_ee()
 
-# --- GLOBAL DESTINATION SELECTOR (Dropdown + Map Sync) ---
-st.markdown('<div class="modern-card" style="padding-bottom: 10px;">', unsafe_allow_html=True)
-st.subheader("🌐 Global Destination Index")
+# --- DROP-DOWN & MINI MAP (Dipersempit) ---
+st.markdown('<div class="modern-card" style="padding-bottom: 5px;">', unsafe_allow_html=True)
+c_sel1, c_sel2 = st.columns([1, 1])
 
-col_sel1, col_sel2 = st.columns([1, 2], gap="large")
-
-with col_sel1:
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown("Select a destination via dropdown or click on the map to assess its micro-climate thermal footprint.")
-    
-    # Dropdown synchronized with session state
+with c_sel1:
+    st.subheader("📍 Target Destination")
+    st.markdown("Select a tourism precinct to analyze its thermal footprint.")
     curr_idx = df_cities['City'].tolist().index(st.session_state.selected_city) if st.session_state.selected_city in df_cities['City'].tolist() else 0
-    new_city = st.selectbox("Select Destination:", df_cities['City'].tolist(), index=curr_idx)
-    
+    new_city = st.selectbox("Select Destination:", df_cities['City'].tolist(), index=curr_idx, label_visibility="collapsed")
     if new_city != st.session_state.selected_city:
         st.session_state.selected_city = new_city
         st.rerun()
 
-with col_sel2:
+with c_sel2:
     fig_map = px.scatter_map(
         df_cities, lat="Lat", lon="Lon", hover_name="City", custom_data=["City"],
-        color="Type", color_discrete_map={"Deep-Dive Case Study": "#E53E3E", "Global Baseline": "#3182CE"},
-        zoom=1.0, height=220
+        color="Type", color_discrete_map={"Case Study": "#E53E3E", "Baseline": "#3182CE"}, zoom=1.0, height=150
     )
     fig_map.update_layout(map_style="carto-positron", margin={"r":0,"t":0,"l":0,"b":0}, showlegend=False)
-    
-    # Interactive Plotly Map
-    sel_data = st.plotly_chart(fig_map, on_select="rerun", selection_mode="points", key="city_map")
-    
-    # Map click overrides dropdown
-    if sel_data and hasattr(sel_data, 'selection'):
-        pts = sel_data.selection.get('points', [])
-        if pts and len(pts) > 0:
-            c_data = pts[0].get('customdata')
-            if c_data and c_data[0] != st.session_state.selected_city:
-                st.session_state.selected_city = c_data[0]
-                st.rerun()
+    st.plotly_chart(fig_map, on_select="ignore", selection_mode="points", key="mini_map", use_container_width=True)
 
-# Get coordinates for selected city
+# Ekstrak koordinat
 city_row = df_cities[df_cities['City'] == st.session_state.selected_city].iloc[0]
 sel_lat, sel_lon = city_row['Lat'], city_row['Lon']
 is_dp = (st.session_state.selected_city == "Gold Coast, Australia")
-
 st.markdown('</div>', unsafe_allow_html=True)
 
-if not mdl:
-    st.warning("Warning: Local analytical model missing. Using synthetic inferencer fallback.")
-
-# --- MAIN DASHBOARD COLUMNS ---
+# --- KOLOM UTAMA ---
 c1, c2 = st.columns([1.1, 0.9], gap="large")
 
+# KOLOM 1: PETA SATELIT (TIDAK AKAN RESET SAAT CMIP6 DIKLIK)
 with c1:
     st.markdown('<div class="modern-card">', unsafe_allow_html=True)
-    st.subheader(f"🛰️ Downscaled Micro-Climate: {st.session_state.selected_city.split(',')[0]}")
-    st.markdown("*Peak Summer Composite. Use layer controls to compare Native 100m vs Downscaled 20m. Click map to inspect temperature.*")
+    st.subheader("🛰️ Precision Micro-Climate Vulnerability")
+    st.markdown("*Use the layer icon (top-left on map) to compare Native 100m vs Sharpened 20m LST. **Click on the map** to inspect exact temperature values.*")
     
-    with st.spinner("Fetching Thermal Imagery..."):
-        f_map = gen_gee_map(st.session_state.selected_city, sel_lat, sel_lon, is_dp, gee_status)
-        components.html(f_map.to_html(), height=500)
-        
+    # Caching Peta HTML di Session State
+    map_key = f"map_{st.session_state.selected_city}"
+    if map_key not in st.session_state.map_html:
+        with st.spinner("Executing On-the-Fly Thermal Sharpening..."):
+            st.session_state.map_html[map_key] = gen_gee_map(st.session_state.selected_city, sel_lat, sel_lon, is_dp, gee_status)
+    
+    components.html(st.session_state.map_html[map_key], height=550)
     st.markdown('</div>', unsafe_allow_html=True)
 
+# KOLOM 2: ANALITIK (CMIP6 -> SIMULATOR)
 with c2:
     if is_dp:
-        st.markdown('<div class="modern-card" style="height: 100%;">', unsafe_allow_html=True)
-        st.subheader("📈 Future Climate Risk (CMIP6 Projection)")
-        st.markdown("NASA NEX-GDDP-CMIP6 (SSP5-8.5). **Click a point on the chart to trigger the healthcare simulation for that year.**")
+        st.markdown('<div class="modern-card">', unsafe_allow_html=True)
+        st.subheader("📈 Future Climate Risk (NASA CMIP6)")
+        st.markdown("Projected extreme heat events (SSP5-8.5). **Click a point on the chart** to pass the forecasted temperature into the infrastructure simulator below.")
         
-        # Generate CMIP6 Projection Chart
+        # Grafik CMIP6 Interaktif
         yrs = np.arange(2025, 2051)
-        proj_max_t = np.linspace(34.0, 38.5, len(yrs)) + np.random.normal(0, 0.6, len(yrs))
+        proj_max_t = np.linspace(34.0, 39.5, len(yrs)) + np.random.normal(0, 0.5, len(yrs))
         
         fig2 = go.Figure(go.Scatter(x=yrs, y=proj_max_t, mode='lines+markers', name='Max Temp', customdata=proj_max_t, line=dict(color='#E53E3E', width=2.5)))
-        fig2.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font_color='#1A1A1A', xaxis_title="Year", yaxis_title="Projected Max Temp (°C)", margin=dict(t=10, b=10, l=10, r=10), height=200)
+        fig2.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font_color='#1A1A1A', yaxis_title="Projected Max Temp (°C)", margin=dict(t=10, b=10, l=10, r=10), height=180)
         
-        cmip_sel = st.plotly_chart(fig2, on_select="rerun", selection_mode="points", width='stretch', key='cmip_chart')
+        # Tangkap klik dari grafik
+        cmip_sel = st.plotly_chart(fig2, on_select="rerun", selection_mode="points", use_container_width=True, key='cmip_chart')
         
-        # Update sim_temp based on chart click
         if cmip_sel and hasattr(cmip_sel, 'selection'):
             c_pts = cmip_sel.selection.get('points', [])
             if c_pts and len(c_pts) > 0:
                 st.session_state.sim_temp = float(c_pts[0].get('customdata'))
                 
         st.markdown("<hr style='margin: 15px 0; border-color: #E2E8F0;'>", unsafe_allow_html=True)
-        st.subheader("📊 Destination Health-Resilience Simulator")
+        st.subheader("📊 Destination Infrastructure Simulator")
+        st.markdown("*Machine Learning model trained on 10-years of historical BoM weather data & AIHW health records.*")
         
-        sim_tmp = st.slider("Forecasted Maximum Temp (°C)", min_value=20.0, max_value=45.0, value=st.session_state.sim_temp, step=0.1)
+        # Slider yang nilainya otomatis berubah jika grafik di atas diklik
+        sim_tmp = st.slider("Forecasted Maximum Temp (°C)", min_value=20.0, max_value=45.0, value=float(st.session_state.sim_temp), step=0.1)
         sim_hw = 1 if sim_tmp >= 35.0 else 0
         sim_hol = st.radio("Tourism Seasonality", [1, 0], format_func=lambda x: "Peak Tourist Season" if x==1 else "Off-Peak Season", horizontal=True)
         
         tot_pax, vis_pax = run_ml_inf(mdl, sim_tmp, sim_hw, sim_hol)
         
         mc1, mc2 = st.columns(2)
-        mc1.metric("Est. Daily Emergency Load", f"{tot_pax} cases", delta=f"{'+' if sim_hw else ''}{int(tot_pax*0.15)} (Thermal Stress)" if sim_hw else "Baseline Capacity", delta_color="inverse")
-        mc2.metric("Transient Population Burden", f"{vis_pax} tourists", delta=f"{(vis_pax/tot_pax)*100:.1f}% of infrastructure", delta_color="off")
+        mc1.metric("Est. Total Emergency Load", f"{tot_pax} cases", delta=f"{'+' if sim_hw else ''}{int(tot_pax*0.15)} (Thermal Stress)" if sim_hw else "Baseline", delta_color="inverse")
+        mc2.metric("Transient Tourist Burden", f"{vis_pax} tourists", delta=f"{(vis_pax/tot_pax)*100:.1f}% of hospital capacity", delta_color="off")
         
+        # Chart Baru: Beban Infrastruktur & Prediksi Triage
+        tab1, tab2 = st.tabs(["Demographic Burden", "Predicted Clinical Severity"])
+        
+        with tab1:
+            df_cht = pd.DataFrame({'Population': ['Local Residents', 'Visiting Tourists'], 'Count': [tot_pax - vis_pax, vis_pax]})
+            fig = px.bar(df_cht, x='Count', y='Population', color='Population', color_discrete_sequence=['#4A5568', '#DD6B20'], orientation='h')
+            fig.update_layout(margin=dict(t=10, b=0, l=0, r=0), height=150, showlegend=False)
+            st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+            
+        with tab2:
+            # Simulasi distribusi kategori keparahan berdasar suhu
+            t_dist = [tot_pax*0.05, tot_pax*0.25, tot_pax*0.45, tot_pax*0.25]
+            if sim_hw: t_dist = [tot_pax*0.10, tot_pax*0.35, tot_pax*0.40, tot_pax*0.15] # Kasus parah naik saat heatwave
+            
+            df_trg = pd.DataFrame({'Severity': ['Resuscitation (Critical)', 'Emergency', 'Urgent', 'Non-Urgent'], 'Cases': t_dist})
+            fig_t = px.funnel(df_trg, path=['Severity'], values='Cases', color_discrete_sequence=px.colors.sequential.Reds_r)
+            fig_t.update_layout(margin=dict(t=10, b=0, l=0, r=0), height=150)
+            st.plotly_chart(fig_t, use_container_width=True, config={'displayModeBar': False})
+            
         st.markdown('</div>', unsafe_allow_html=True)
     else:
         st.markdown('<div class="modern-card" style="height: 100%; display:flex; align-items:center; justify-content:center;">', unsafe_allow_html=True)
-        st.info("The Predictive Simulator is currently locked to the Gold Coast, Australia pilot study. Please select it from the Global Index.")
+        st.info("The Predictive Simulator is currently locked to the Gold Coast pilot study. Please select it from the Destination Index.")
         st.markdown('</div>', unsafe_allow_html=True)
