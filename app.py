@@ -60,22 +60,37 @@ st.markdown(css, unsafe_allow_html=True)
 # =====================================================================
 @st.cache_resource
 def init_ee():
-    """Securely init GEE using Streamlit Secrets or Local Auth."""
+    """Securely init GEE using Streamlit Native Secrets or Local Auth."""
     try:
-        if "EARTHENGINE_TOKEN" in st.secrets:
-            token = st.secrets["EARTHENGINE_TOKEN"]
+        # 1. Bulletproof Method: Native Streamlit TOML Dictionary
+        if "gcp_service_account" in st.secrets:
+            key_dict = dict(st.secrets["gcp_service_account"])
             
-            # Safely parse the token string into a dict
+            # Auto-repair escaped newlines in private key caused by TOML parsing
+            if '\\n' in key_dict['private_key']:
+                key_dict['private_key'] = key_dict['private_key'].replace('\\n', '\n')
+                
+            creds = service_account.Credentials.from_service_account_info(key_dict)
+            ee.Initialize(credentials=creds)
+            return True, "Authenticated via Native GCP Secrets"
+            
+        # 2. Legacy Method: Raw JSON String (Fragile to invisible characters)
+        elif "EARTHENGINE_TOKEN" in st.secrets:
+            token = st.secrets["EARTHENGINE_TOKEN"]
             if isinstance(token, str):
+                # Clean up invisible characters like \xa0 from copy-pasting
+                token = token.replace('\xa0', ' ').strip()
                 key_dict = json.loads(token)
             else:
                 key_dict = dict(token)
                 
             creds = service_account.Credentials.from_service_account_info(key_dict)
             ee.Initialize(credentials=creds)
-            return True, "Authenticated via Secrets"
+            return True, "Authenticated via Legacy JSON Secrets"
+            
+        # 3. Local Machine Method
         else:
-            ee.Initialize() # Fallback for local environment
+            ee.Initialize() 
             return True, "Authenticated via Local Default"
     except Exception as e:
         return False, str(e)
@@ -129,7 +144,7 @@ with st.sidebar:
 # --- HEADER ---
 st.markdown('<div class="glass-card">', unsafe_allow_html=True)
 st.title("🏥 V-HEAT: Visitor-Health Extreme Analytics Tool")
-st.markdown('<div class="disclaimer"><b>Academic Integrity Disclaimer:</b> As individual daily health records are highly sensitive, this PoC utilizes mathematically downscaled AIHW annual aggregate data to demonstrate GeoAI pipeline capabilities.</div>', unsafe_allow_html=True)
+st.markdown('<div class="disclaimer"><b>Academic Integrity Disclaimer:</b> As individual daily health records are highly sensitive, this PoC utilizes mathematically downscaled AIHW annual aggregate data to demonstrate analytical pipeline capabilities.</div>', unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
 # --- ELEGANT LOADING UI & INITIALIZATION ---
