@@ -67,11 +67,7 @@ def init_ee():
             # Create the credentials object
             creds = service_account.Credentials.from_service_account_info(key_dict).with_scopes(scp)
             
-            # CRITICAL FIX: FORCE GEE to use these credentials and ONLY these.
-            # This prevents GEE from falling back to ee.Authenticate() if it finds ghost credentials.
-            ee.data.setCredentials(creds)
-            
-            # Initialize with the project ID
+            # Initialize with the project ID AND credentials
             ee.Initialize(credentials=creds, project=key_dict.get('project_id'))
             
             return True, "Authenticated via Native GCP Secrets"
