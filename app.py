@@ -170,8 +170,6 @@ def gen_baseline_map(lat, lon, year_selection, gee_ready):
     """Generates the native 100m Landsat LST baseline map."""
     m = geemap.Map(center=[lat, lon], zoom=12, ee_initialize=False, draw_control=False, measure_control=False)
     m.add_basemap("CartoDB.Positron")
-    
-    # Implementing Folium's LatLngPopup as an alternative to EE Inspector for Streamlit
     m.add_child(folium.LatLngPopup())
     
     stats_dict = {"min": 0.0, "mean": 0.0, "median": 0.0, "max": 0.0}
@@ -192,12 +190,10 @@ def gen_baseline_map(lat, lon, year_selection, gee_ready):
                 mask = qa.bitwiseAnd(1 << 4).eq(0).And(qa.bitwiseAnd(1 << 3).eq(0))
                 return img.updateMask(mask)
                 
-            # Temporal Aggregation: Using Median to remove cloud anomalies over the selected period
             lst_100m = l8.map(mask_l8).median().select('ST_B10').multiply(0.00341802).add(149.0).subtract(273.15).rename('LST')
             valid_mask = lst_100m.gt(5).And(lst_100m.lt(55))
             lst_100m = lst_100m.updateMask(valid_mask)
             
-            # Spatial Aggregation: Zonal Statistics over the Precinct Boundary
             reducer = ee.Reducer.mean().combine(ee.Reducer.max(), sharedInputs=True)\
                                        .combine(ee.Reducer.min(), sharedInputs=True)\
                                        .combine(ee.Reducer.median(), sharedInputs=True)
@@ -278,7 +274,7 @@ def run_rf_downscaling_split(lat, lon, year_selection):
         
         m = geemap.Map(center=[lat, lon], zoom=12, ee_initialize=False, draw_control=False, measure_control=False)
         m.add_basemap("CartoDB.Positron")
-        m.add_child(folium.LatLngPopup()) # Add click-for-coordinates functionality
+        m.add_child(folium.LatLngPopup()) 
         
         vis = {'min': 25, 'max': 50, 'palette': ['#ffffb2', '#fed976', '#feb24c', '#fd8d3c', '#fc4e2a', '#e31a1c', '#b10026'], 'opacity': 0.9}
         
@@ -384,7 +380,7 @@ df_cities['Type'] = np.where(df_cities['City'].str.contains('Australia'), 'Prima
 # =====================================================================
 st.markdown('<div class="header-card">', unsafe_allow_html=True)
 st.markdown("<h1>V-HEAT: Destination Infrastructure Resilience Model</h1>", unsafe_allow_html=True)
-st.markdown("<p>An integrated analytical framework linking Earth Observation, Historical Climate baselines, Future Projections, and Public Health infrastructure to assess tourism destination carrying capacity under extreme heat.</p>", unsafe_allow_html=True)
+st.markdown("<p>An integrated analytical framework linking Earth Observation (GEE), Historical Climate baselines (BoM), Future Projections (NASA CMIP6), and Public Health infrastructure to assess tourism destination carrying capacity under extreme heat.</p>", unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
 with st.expander("How to Use This Dashboard"):
@@ -413,6 +409,13 @@ with st.expander("Architecture, Methodology & Transparent Data Sources"):
     * **Baseline Hospital Data:** The underlying health capacity model is anchored to **2022 records**, deliberately selected as a stable, post-pandemic representative period to accurately gauge standard hospital carrying capacity without COVID-19 lockdown anomalies.
     * **Demographic Scaling Factor (Proof of Concept Assumption):** Because this model is trained exclusively on the Gold Coast (12 Million annual tourists), simulating capacity for other Australian cities utilizes a synthetic scaling multiplier. This compares local tourist volume against the Gold Coast baseline to proportionally scale the hospital bed footprint. 
     * *Tourist volumes for the global matrix are synthesized estimates benchmarking the Mastercard Global Destination Cities Index.*
+    
+    **Resilience Status & Clinical Triage Assumptions:**
+    * **SAFE:** Triggered when the maximum temperature is below the extreme heat threshold (<35°C) during off-peak seasons.
+    * **WARNING:** Triggered by EITHER an extreme heat event (≥35°C) OR peak tourist season volume.
+    * **CRITICAL:** Triggered when BOTH an extreme heat event (≥35°C) AND peak tourist season occur simultaneously, presenting a severe risk of infrastructure failure.
+    * **Baseline vs Heat Stress Burden:** "Baseline" refers to the expected daily emergency presentations under normal thermal conditions. The delta (Heat Stress Burden) represents the excess patient influx directly attributable to temperatures exceeding 35°C.
+    * **Clinical Triage Shift:** During heatwaves (≥35°C), the model assumes a proportional shift in clinical severity. Presentations requiring 'Resuscitation' and 'Emergency' care increase by approximately 7-13% due to acute thermal stress, while 'Non-Urgent' cases relatively decrease.
     """)
 
 mdl = load_ml_mdl()
@@ -530,7 +533,7 @@ with c1:
             components.html(map_html_rf, height=450)
             
             st.markdown("##### LST Extracted Statistics: Native vs Downscaled")
-            st.markdown('<span class="subtitle-text">Notice how the downscaled 20m model may detect higher extreme localized temperatures (Hotspots) missed by the 100m baseline, while smoothing anomalous out-of-bounds pixels.</span>', unsafe_allow_html=True)
+            st.markdown('<span class="subtitle-text">Notice how the downscaled 20m model may detect higher extreme localized temperatures (Hotspots) missed by the 100m baseline, while smoothing anomalous out-of-bounds pixels (Regression to the mean).</span>', unsafe_allow_html=True)
             
             # Inject Downscaled Average Temp into simulator
             if st.session_state.temp_source in ["Default", "Native LST", "Downscaled LST"]:
@@ -559,7 +562,7 @@ with c1:
                     fig_i.update_layout(height=200, margin=dict(t=30, b=0, l=0, r=0), paper_bgcolor='rgba(0,0,0,0)')
                     st.plotly_chart(fig_i, use_container_width=True, config={'displayModeBar': False})
         else:
-            st.error(f"Spatial downscaling failed due to Google Earth Engine timeout or lack of satellite data for this region. Detail: {df_ev}")
+            st.error("Spatial downscaling failed due to Google Earth Engine timeout or lack of satellite data for this region.")
             
         if st.button("Back to Baseline Map"):
             st.session_state.rf_downscale_run = False
@@ -622,6 +625,26 @@ with c2:
         mc1, mc2 = st.columns(2)
         mc1.metric("Est. Daily Hospital Cases", f"{tot_pax}", delta=f"{'+' if sim_hw else ''}{int(tot_pax*0.12)} (Heat Stress Burden)" if sim_hw else "Baseline", delta_color="inverse")
         mc2.metric("Transient Tourist Load", f"{vis_pax}", delta=f"{(vis_pax/tot_pax)*100:.1f}% of operating capacity", delta_color="off")
+        
+        # Triage Distribution Chart
+        st.markdown("##### Predicted Clinical Severity Distribution")
+        
+        t_dist = [tot_pax*0.05, tot_pax*0.25, tot_pax*0.45, tot_pax*0.25]
+        if sim_hw: 
+            t_dist = [tot_pax*0.12, tot_pax*0.38, tot_pax*0.35, tot_pax*0.15] 
+            
+        df_trg = pd.DataFrame({
+            'Category': ['Resuscitation', 'Emergency', 'Urgent', 'Non-Urgent'], 
+            'Cases': t_dist
+        })
+        
+        fig_t = px.bar(df_trg, x='Cases', y=['Capacity Load']*4, color='Category', orientation='h',
+                       color_discrete_sequence=['#9B2C2C', '#DD6B20', '#ECC94B', '#48BB78'])
+        fig_t.update_layout(barmode='stack', margin=dict(t=10, b=0, l=0, r=0), height=110, 
+                            yaxis_title=None, xaxis_title=None, showlegend=True,
+                            legend=dict(orientation="h", yanchor="bottom", y=-0.8, xanchor="center", x=0.5))
+        fig_t.update_yaxes(showticklabels=False)
+        st.plotly_chart(fig_t, use_container_width=True, config={'displayModeBar': False})
         
         if sim_hw and sim_hol:
             st.markdown('<div class="status-badge status-critical">CRITICAL: Severe Heatwave during Peak Season. High risk of infrastructure failure.</div>', unsafe_allow_html=True)
