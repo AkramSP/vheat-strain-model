@@ -133,7 +133,8 @@ def get_ai_policy_insights(city, temp, year, status, tourist_pct, lst_max):
     try:
         if "GEMINI_API_KEY" in st.secrets:
             genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-            model = genai.GenerativeModel('gemini-1.5-flash')
+            # Menggunakan model Gemini 3.1 Flash Lite Preview sesuai instruksi
+            model = genai.GenerativeModel('gemini-3.1-flash-lite-preview')
             prompt = f"""
             Act as an expert Sustainable Tourism and Public Health Policy Advisor.
             Analyze the following climate and infrastructure scenario for the destination: {city}.
