@@ -1,5 +1,4 @@
 import streamlit as st
-import streamlit.components.v1 as components
 import ee
 import json
 import warnings
@@ -10,9 +9,9 @@ import plotly.express as px
 import plotly.graph_objects as go
 import joblib
 from sklearn.metrics import mean_squared_error, r2_score
-import geemap.foliumap as geemap
 import folium
 from folium.plugins import SideBySideLayers
+from streamlit_folium import st_folium
 import google.generativeai as genai
 
 # =====================================================================
@@ -24,7 +23,7 @@ if hasattr(ee, 'data') and not hasattr(ee.data, '_credentials'):
     ee.data._credentials = None
 
 # =====================================================================
-# 1. PAGE CONFIG & MODERN UX (CSS ANIMATIONS)
+# 1. PAGE CONFIG & MODERN UX (CSS)
 # =====================================================================
 st.set_page_config(page_title="V-HEAT: Destination Resilience", layout="wide", initial_sidebar_state="collapsed")
 
@@ -45,8 +44,6 @@ css = """
         animation: slideUpFade 0.4s ease-out forwards;
         transition: all 0.3s ease;
     }
-    .modern-card:hover { box-shadow: 0 8px 12px -3px rgba(0,0,0,0.05); transform: translateY(-1px); }
-    
     .header-card { 
         background: linear-gradient(135deg, #0F172A 0%, #1E3A8A 100%); color: white; border-radius: 8px; padding: 40px 30px; margin-bottom: 25px; 
         animation: slideUpFade 0.3s ease-out forwards;
@@ -76,6 +73,7 @@ css = """
     .btn-ml > button:hover { background-color: #1E40AF; color: white; border: none; transform: scale(1.01);}
     
     .ai-box { background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 6px; padding: 20px; font-size: 0.95rem; line-height: 1.6; color: #334155; }
+    .inspector-box { background-color: #FFFFFF; border-left: 3px solid #0F172A; padding: 10px 15px; margin-bottom: 15px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); font-size: 0.9rem; color: #1E293B;}
     
     [data-testid="collapsedControl"] { display: none; }
 </style>
@@ -91,8 +89,6 @@ if 'selected_year' not in st.session_state:
     st.session_state.selected_year = "2019-2025 Multi-Year Composite"
 if 'rf_downscale_run' not in st.session_state:
     st.session_state.rf_downscale_run = False
-if 'rf_results' not in st.session_state:
-    st.session_state.rf_results = None
 if 'sim_temp' not in st.session_state:
     st.session_state.sim_temp = 35.0
 if 'temp_slider' not in st.session_state:
@@ -103,6 +99,8 @@ if 'temp_source' not in st.session_state:
     st.session_state.temp_source = "Default"
 if 'cmip_chart_key' not in st.session_state:
     st.session_state.cmip_chart_key = 0
+if 'run_ai' not in st.session_state:
+    st.session_state.run_ai = False
 
 # =====================================================================
 # 3. CORE FUNCTIONS (GEE, ML & LLM)
@@ -126,20 +124,17 @@ def init_ee():
 
 @st.cache_resource(show_spinner=False)
 def load_ml_mdl():
-    """Loads the pre-trained Scikit-Learn hospital strain model."""
     p = 'rf_vheat_model.joblib'
     if os.path.exists(p):
         return joblib.load(p)
     return None
 
 def get_ai_policy_insights(city, temp, year, status, tourist_pct, lst_max):
-    """Generates dynamic policy recommendations using a two-step LLM chain (Retrieval via 2.5, Synthesis via 3.1)."""
+    """Generates dynamic policy recommendations using a two-step LLM chain with mandatory citations."""
     try:
         if "GEMINI_API_KEY" in st.secrets:
             genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
             
-            # Step 1: Information Retrieval via gemini-2.5-flash (Grounding enabled)
-            # Out of the Box: Robust error handling for dynamic API changes
             local_context = "General sustainable tourism resilience protocols."
             try:
                 model_search = genai.GenerativeModel('gemini-2.5-flash')
@@ -148,10 +143,8 @@ def get_ai_policy_insights(city, temp, year, status, tourist_pct, lst_max):
                 if search_response and search_response.text:
                     local_context = search_response.text
             except Exception as search_err:
-                print(f"Grounding search bypassed due to API constraints. Proceeding with fundamental knowledge. Log: {str(search_err)}")
-                pass # Bypass gracefully without crashing the app
+                pass # Bypass grounding if API fails, proceed with fundamental knowledge
             
-            # Step 2: Synthesis and Formatting via gemini-3.1-flash-lite-preview
             model_synth = genai.GenerativeModel('gemini-3.1-flash-lite-preview')
             synth_prompt = f"""
             Act as an expert Sustainable Tourism and Public Health Policy Advisor.
@@ -169,9 +162,10 @@ def get_ai_policy_insights(city, temp, year, status, tourist_pct, lst_max):
             
             TASK:
             1. Provide exactly 3 concise, highly actionable policy recommendations (bullet points) for the local destination management organization (DMO) and city council to mitigate this specific level of tourism-related hospital strain.
-            2. Integrate the provided LOCAL CONTEXT to ensure the recommendations are highly relevant to {city}.
-            3. CRITICAL: Align the tone and strategic focus directly with the published research paradigms of Professor Susanne Becken (expert in Sustainable Tourism and Climate Change Adaptation). Specifically emphasize "systemic destination resilience", "tourism-climate risk management", "visitor vulnerability/safety", and the "economic and reputational risks" of failing to adapt to climate change.
-            4. Use a professional, academic, and authoritative tone. Do not use emojis. Limit the response to 150 words.
+            2. Integrate the provided LOCAL CONTEXT to ensure the recommendations are relevant to {city}.
+            3. CRITICAL: Align the tone and strategic focus directly with the published research paradigms of Professor Susanne Becken (expert in Sustainable Tourism and Climate Change Adaptation). Emphasize "systemic destination resilience", "visitor vulnerability", and "reputational risks".
+            4. MANDATORY CITATION: You MUST conclude your response with a "Key Reference" section containing at least one markdown hyperlink citing a specific, real-world research paper authored by Professor Susanne Becken that supports your strategies (e.g., `[Becken, S. (Year). Title. Journal.](URL)`). Search your knowledge base to ensure the paper exists.
+            5. Use a professional, academic, and authoritative tone. Do not use emojis. Limit the response to 150 words (excluding citations).
             """
             final_response = model_synth.generate_content(synth_prompt)
             return final_response.text
@@ -216,17 +210,10 @@ def get_date_range(year_selection):
     else:
         return f'{year_selection}-01-01', f'{year_selection}-12-31'
 
-@st.cache_data(show_spinner=False)
-def gen_baseline_map(lat, lon, year_selection, gee_ready):
-    m = geemap.Map(center=[lat, lon], zoom=12, ee_initialize=False, draw_control=False, measure_control=False)
-    m.add_basemap("CartoDB.Positron")
-    m.add_child(folium.LatLngPopup())
-    
-    stats_dict = {"min": 0.0, "mean": 0.0, "median": 0.0, "max": 0.0}
-    
-    if not gee_ready:
-        return m.to_html(), stats_dict
-        
+# Modified to return EE objects instead of HTML to allow native Streamlit-Folium integration
+@st.cache_resource(show_spinner=False)
+def get_ee_baseline_data(lat, lon, year_selection, gee_ready):
+    if not gee_ready: return None, None, None
     try:
         pt = ee.Geometry.Point([lon, lat])
         roi = pt.buffer(8000) 
@@ -234,37 +221,31 @@ def gen_baseline_map(lat, lon, year_selection, gee_ready):
         start_date, end_date = get_date_range(year_selection)
             
         l8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2").filterBounds(roi).filterDate(start_date, end_date).filter(month_filter)
-        if l8.size().getInfo() > 0:
-            def mask_l8(img):
-                qa = img.select('QA_PIXEL')
-                mask = qa.bitwiseAnd(1 << 4).eq(0).And(qa.bitwiseAnd(1 << 3).eq(0))
-                return img.updateMask(mask)
-                
-            lst_100m = l8.map(mask_l8).median().select('ST_B10').multiply(0.00341802).add(149.0).subtract(273.15).rename('LST')
-            valid_mask = lst_100m.gt(5).And(lst_100m.lt(55))
-            lst_100m = lst_100m.updateMask(valid_mask)
-            
-            reducer = ee.Reducer.mean().combine(ee.Reducer.max(), sharedInputs=True)\
-                                       .combine(ee.Reducer.min(), sharedInputs=True)\
-                                       .combine(ee.Reducer.median(), sharedInputs=True)
-                                       
-            stats = lst_100m.reduceRegion(reducer=reducer, geometry=roi, scale=100, maxPixels=1e9).getInfo()
-            
-            stats_dict['mean'] = safe_stat(stats, 'LST_mean')
-            stats_dict['median'] = safe_stat(stats, 'LST_median')
-            stats_dict['max'] = safe_stat(stats, 'LST_max')
-            stats_dict['min'] = safe_stat(stats, 'LST_min')
-            
-            vis_params = {'min': 25, 'max': 50, 'palette': ['#ffffb2', '#fed976', '#feb24c', '#fd8d3c', '#fc4e2a', '#e31a1c', '#b10026'], 'opacity': 0.8}
-            m.addLayer(lst_100m.clip(roi), vis_params, f'Baseline Native LST (100m)')
-            m.addLayer(ee.Image().paint(roi, 0, 2), {'palette': ['#1E293B']}, 'Tourism Precinct Boundary')
-            m.add_colorbar(vis_params, label="Surface Temperature (Celsius)", orientation="horizontal")
-    except Exception as e:
-        pass
+        if l8.size().getInfo() == 0: return None, None, None
         
-    return m.to_html(), stats_dict
+        def mask_l8(img):
+            qa = img.select('QA_PIXEL')
+            mask = qa.bitwiseAnd(1 << 4).eq(0).And(qa.bitwiseAnd(1 << 3).eq(0))
+            return img.updateMask(mask)
+            
+        lst_100m = l8.map(mask_l8).median().select('ST_B10').multiply(0.00341802).add(149.0).subtract(273.15).rename('LST')
+        valid_mask = lst_100m.gt(5).And(lst_100m.lt(55))
+        lst_100m = lst_100m.updateMask(valid_mask)
+        
+        reducer = ee.Reducer.mean().combine(ee.Reducer.max(), sharedInputs=True).combine(ee.Reducer.min(), sharedInputs=True).combine(ee.Reducer.median(), sharedInputs=True)
+        stats = lst_100m.reduceRegion(reducer=reducer, geometry=roi, scale=100, maxPixels=1e9).getInfo()
+        
+        stats_dict = {
+            'mean': safe_stat(stats, 'LST_mean'), 'median': safe_stat(stats, 'LST_median'),
+            'max': safe_stat(stats, 'LST_max'), 'min': safe_stat(stats, 'LST_min')
+        }
+        return lst_100m, stats_dict, roi
+    except Exception:
+        return None, None, None
 
-def run_rf_downscaling_split(lat, lon, year_selection):
+@st.cache_resource(show_spinner=False)
+def get_ee_downscaled_data(lat, lon, year_selection, gee_ready):
+    if not gee_ready: return None, None, None, None, None, None, None, None
     try:
         pt = ee.Geometry.Point([lon, lat])
         roi = pt.buffer(8000)
@@ -277,7 +258,6 @@ def run_rf_downscaling_split(lat, lon, year_selection):
             mask = qa.bitwiseAnd(1 << 4).eq(0).And(qa.bitwiseAnd(1 << 3).eq(0))
             return img.updateMask(mask)
         lst_100m = l8.map(mask_l8).median().select('ST_B10').multiply(0.00341802).add(149.0).subtract(273.15).rename('LST')
-        
         valid_mask = lst_100m.gt(5).And(lst_100m.lt(55))
         lst_100m = lst_100m.updateMask(valid_mask)
         
@@ -294,19 +274,12 @@ def run_rf_downscaling_split(lat, lon, year_selection):
         predictors = ee.Image([ndvi, ndbi, ndwi, elev, slope, aspect])
         feat_names = ['NDVI', 'NDBI', 'NDWI', 'elevation', 'Slope', 'Aspect']
         
-        training_img = lst_100m.addBands(predictors)
-        training_pts = training_img.sample(region=roi, scale=100, numPixels=350, seed=42, geometries=False, dropNulls=True)
-        rf_model = ee.Classifier.smileRandomForest(30).setOutputMode('REGRESSION').train(
-            features=training_pts, classProperty='LST', inputProperties=feat_names
-        )
-        
+        training_pts = lst_100m.addBands(predictors).sample(region=roi, scale=100, numPixels=350, seed=42, geometries=False, dropNulls=True)
+        rf_model = ee.Classifier.smileRandomForest(30).setOutputMode('REGRESSION').train(features=training_pts, classProperty='LST', inputProperties=feat_names)
         lst_20m = predictors.classify(rf_model, 'Predicted_LST').updateMask(valid_mask)
         dict_imp = rf_model.explain().get('importance').getInfo()
         
-        reducer = ee.Reducer.mean().combine(ee.Reducer.max(), sharedInputs=True)\
-                                   .combine(ee.Reducer.min(), sharedInputs=True)\
-                                   .combine(ee.Reducer.median(), sharedInputs=True)
-                                   
+        reducer = ee.Reducer.mean().combine(ee.Reducer.max(), sharedInputs=True).combine(ee.Reducer.min(), sharedInputs=True).combine(ee.Reducer.median(), sharedInputs=True)
         stats_100 = lst_100m.reduceRegion(reducer=reducer, geometry=roi, scale=100, maxPixels=1e9).getInfo()
         stats_20 = lst_20m.reduceRegion(reducer=reducer, geometry=roi, scale=20, maxPixels=1e9).getInfo()
         
@@ -315,34 +288,14 @@ def run_rf_downscaling_split(lat, lon, year_selection):
             'd_min': safe_stat(stats_20, 'Predicted_LST_min'), 'd_mean': safe_stat(stats_20, 'Predicted_LST_mean'), 'd_median': safe_stat(stats_20, 'Predicted_LST_median'), 'd_max': safe_stat(stats_20, 'Predicted_LST_max')
         }
         
-        predicted_pts = training_pts.classify(rf_model, 'Predicted_LST')
-        val_data = predicted_pts.reduceColumns(ee.Reducer.toList(2), ['LST', 'Predicted_LST']).get('list').getInfo()
+        val_data = training_pts.classify(rf_model, 'Predicted_LST').reduceColumns(ee.Reducer.toList(2), ['LST', 'Predicted_LST']).get('list').getInfo()
         df_eval = pd.DataFrame(val_data, columns=['Actual', 'Predicted'])
         rmse = np.sqrt(mean_squared_error(df_eval['Actual'], df_eval['Predicted']))
         r2 = r2_score(df_eval['Actual'], df_eval['Predicted'])
         
-        m = geemap.Map(center=[lat, lon], zoom=12, ee_initialize=False, draw_control=False, measure_control=False)
-        m.add_basemap("CartoDB.Positron")
-        m.add_child(folium.LatLngPopup()) 
-        
-        vis = {'min': 25, 'max': 50, 'palette': ['#ffffb2', '#fed976', '#feb24c', '#fd8d3c', '#fc4e2a', '#e31a1c', '#b10026'], 'opacity': 0.9}
-        
-        left_url = lst_100m.clip(roi).getMapId(vis)['tile_fetcher'].url_format
-        right_url = lst_20m.clip(roi).getMapId(vis)['tile_fetcher'].url_format
-        
-        left_tile = folium.TileLayer(tiles=left_url, attr='Google Earth Engine', name='Native 100m', overlay=True, control=True)
-        right_tile = folium.TileLayer(tiles=right_url, attr='Google Earth Engine', name='Downscaled 20m', overlay=True, control=True)
-        
-        left_tile.add_to(m)
-        right_tile.add_to(m)
-        SideBySideLayers(left_tile, right_tile).add_to(m)
-        
-        m.addLayer(ee.Image().paint(roi, 0, 2), {'palette': ['#1E293B']}, 'Precinct Boundary')
-        m.add_colorbar(vis, label="Surface Temperature (Celsius)", orientation="horizontal")
-        
-        return m.to_html(), df_eval, rmse, r2, dict_imp, comp_stats
+        return lst_100m, lst_20m, df_eval, rmse, r2, dict_imp, comp_stats, roi
     except Exception as e:
-        return None, str(e), None, None, None, None
+        return None, None, None, None, None, None, None, None
 
 def run_ml_inf(mdl, tmp, is_hw, is_hol, scale_factor=1.0):
     if mdl:
@@ -358,7 +311,6 @@ def run_ml_inf(mdl, tmp, is_hw, is_hol, scale_factor=1.0):
 # 4. DESTINATION DATABASE
 # =====================================================================
 cty_coords = [
-    # Australia 
     {"City": "Gold Coast, Australia", "Lat": -28.0167, "Lon": 153.4000, "Tourists_M": 12.0, "Avg_Summer_LST": 34.5, "Continent": "Oceania"},
     {"City": "Brisbane, Australia", "Lat": -27.4705, "Lon": 153.0260, "Tourists_M": 8.0, "Avg_Summer_LST": 36.2, "Continent": "Oceania"},
     {"City": "Sydney, Australia", "Lat": -33.8688, "Lon": 151.2093, "Tourists_M": 16.0, "Avg_Summer_LST": 32.5, "Continent": "Oceania"},
@@ -369,10 +321,8 @@ cty_coords = [
     {"City": "Hobart, Australia", "Lat": -42.8821, "Lon": 147.3272, "Tourists_M": 1.5, "Avg_Summer_LST": 25.0, "Continent": "Oceania"},
     {"City": "Darwin, Australia", "Lat": -12.4634, "Lon": 130.8456, "Tourists_M": 1.0, "Avg_Summer_LST": 33.0, "Continent": "Oceania"},
     {"City": "Cairns, Australia", "Lat": -16.9186, "Lon": 145.7781, "Tourists_M": 2.8, "Avg_Summer_LST": 31.5, "Continent": "Oceania"},
-    # New Zealand
     {"City": "Auckland, New Zealand", "Lat": -36.8485, "Lon": 174.7633, "Tourists_M": 3.0, "Avg_Summer_LST": 24.5, "Continent": "Oceania"},
     {"City": "Queenstown, New Zealand", "Lat": -45.0312, "Lon": 168.6626, "Tourists_M": 1.5, "Avg_Summer_LST": 22.0, "Continent": "Oceania"},
-    # Asia
     {"City": "Jakarta, Indonesia", "Lat": -6.2088, "Lon": 106.8456, "Tourists_M": 5.0, "Avg_Summer_LST": 35.0, "Continent": "Asia"},
     {"City": "Bali, Indonesia", "Lat": -8.4095, "Lon": 115.1889, "Tourists_M": 6.5, "Avg_Summer_LST": 30.5, "Continent": "Asia"},
     {"City": "Bangkok, Thailand", "Lat": 13.7563, "Lon": 100.5018, "Tourists_M": 22.7, "Avg_Summer_LST": 38.5, "Continent": "Asia"},
@@ -389,7 +339,6 @@ cty_coords = [
     {"City": "Riyadh, Saudi Arabia", "Lat": 24.7136, "Lon": 46.6753, "Tourists_M": 5.5, "Avg_Summer_LST": 44.5, "Continent": "Asia"},
     {"City": "Mumbai, India", "Lat": 19.0760, "Lon": 72.8777, "Tourists_M": 6.0, "Avg_Summer_LST": 35.0, "Continent": "Asia"},
     {"City": "Delhi, India", "Lat": 28.7041, "Lon": 77.1025, "Tourists_M": 5.5, "Avg_Summer_LST": 42.0, "Continent": "Asia"},
-    # Europe
     {"City": "Istanbul, Turkey", "Lat": 41.0082, "Lon": 28.9784, "Tourists_M": 14.7, "Avg_Summer_LST": 33.5, "Continent": "Europe"},
     {"City": "Rome, Italy", "Lat": 41.9028, "Lon": 12.4964, "Tourists_M": 10.0, "Avg_Summer_LST": 36.0, "Continent": "Europe"},
     {"City": "Venice, Italy", "Lat": 45.4408, "Lon": 12.3155, "Tourists_M": 5.5, "Avg_Summer_LST": 32.5, "Continent": "Europe"},
@@ -405,7 +354,6 @@ cty_coords = [
     {"City": "Vienna, Austria", "Lat": 48.2082, "Lon": 16.3738, "Tourists_M": 6.5, "Avg_Summer_LST": 30.5, "Continent": "Europe"},
     {"City": "Zurich, Switzerland", "Lat": 47.3769, "Lon": 8.5417, "Tourists_M": 3.5, "Avg_Summer_LST": 28.0, "Continent": "Europe"},
     {"City": "Prague, Czechia", "Lat": 50.0755, "Lon": 14.4378, "Tourists_M": 9.0, "Avg_Summer_LST": 29.5, "Continent": "Europe"},
-    # Americas
     {"City": "New York City, USA", "Lat": 40.7128, "Lon": -74.0060, "Tourists_M": 13.5, "Avg_Summer_LST": 34.0, "Continent": "Americas"},
     {"City": "Los Angeles, USA", "Lat": 34.0522, "Lon": -118.2437, "Tourists_M": 8.5, "Avg_Summer_LST": 35.5, "Continent": "Americas"},
     {"City": "Las Vegas, USA", "Lat": 36.1699, "Lon": -115.1398, "Tourists_M": 6.5, "Avg_Summer_LST": 42.0, "Continent": "Americas"},
@@ -415,7 +363,6 @@ cty_coords = [
     {"City": "Cancun, Mexico", "Lat": 21.1619, "Lon": -86.8515, "Tourists_M": 6.0, "Avg_Summer_LST": 34.5, "Continent": "Americas"},
     {"City": "Rio de Janeiro, Brazil", "Lat": -22.9068, "Lon": -43.1729, "Tourists_M": 2.5, "Avg_Summer_LST": 36.0, "Continent": "Americas"},
     {"City": "Buenos Aires, Argentina", "Lat": -34.6037, "Lon": -58.3816, "Tourists_M": 3.0, "Avg_Summer_LST": 34.0, "Continent": "Americas"},
-    # Africa
     {"City": "Cape Town, South Africa", "Lat": -33.9249, "Lon": 18.4241, "Tourists_M": 1.5, "Avg_Summer_LST": 32.0, "Continent": "Africa"},
     {"City": "Cairo, Egypt", "Lat": 30.0444, "Lon": 31.2357, "Tourists_M": 6.0, "Avg_Summer_LST": 41.5, "Continent": "Africa"},
     {"City": "Marrakech, Morocco", "Lat": 31.6295, "Lon": -7.9811, "Tourists_M": 3.0, "Avg_Summer_LST": 40.0, "Continent": "Africa"}
@@ -437,10 +384,13 @@ with st.expander("How to Use This Dashboard"):
     Use the dropdown to select from 50 global tourism precincts. Note that the hospital simulation module is strictly unlocked for Australian cities to ensure predictive integrity.
     
     **Step 2: Explore Spatial Hazards**
-    Review the historical Land Surface Temperature (LST) baseline. You may run the **Spatial Downscaling Model** to sharpen the thermal imagery from 100m to 20m, revealing granular urban heat hotspots.
+    Review the historical Land Surface Temperature (LST) baseline. You may run the **Spatial Downscaling Model** to sharpen the thermal imagery from 100m to 20m, revealing granular urban heat hotspots. Click anywhere on the map to activate the live coordinate inspector.
     
     **Step 3: Analyze Future Projections & Simulate Constraints**
-    Click on a specific year within the **NASA CMIP6 Chart** to inject that year's forecasted maximum temperature directly into the hospital simulator. Alternatively, utilize the manual slider to test hypothetical climate thresholds and observe the corresponding strain on emergency infrastructure.
+    Click on a specific year within the **NASA CMIP6 Chart** to inject that year's forecasted maximum temperature directly into the hospital simulator. Alternatively, utilize the manual slider to test hypothetical climate thresholds.
+    
+    **Step 4: AI Strategic Advisor**
+    Once the parameters are set, generate a dynamic policy brief utilizing Large Language Models to receive actionable mitigation strategies tailored to the localized constraints.
     """)
 
 with st.expander("Architecture, Methodology & Transparent Data Sources"):
@@ -479,18 +429,32 @@ def on_city_change():
     st.session_state.rf_downscale_run = False 
     st.session_state.rf_results = None
     st.session_state.temp_source = "Default"
+    st.session_state.run_ai = False
 
 def on_year_change():
     st.session_state.selected_year = st.session_state.dropdown_year
     st.session_state.rf_downscale_run = False 
     st.session_state.rf_results = None
     st.session_state.temp_source = "Default"
+    st.session_state.run_ai = False
 
 def on_slider_change():
     st.session_state.sim_temp = st.session_state.temp_slider
     st.session_state.temp_source = "Manual"
     st.session_state.sim_year_label = "Manual"
     st.session_state.cmip_chart_key += 1 
+    st.session_state.run_ai = False
+
+def on_downscale_click():
+    st.session_state.rf_downscale_run = True
+    st.session_state.sim_year_label = "Custom Baseline"
+    st.session_state.run_ai = False
+
+def on_back_click():
+    st.session_state.rf_downscale_run = False
+    st.session_state.rf_results = None
+    st.session_state.temp_source = "Default"
+    st.session_state.run_ai = False
 
 # --- MAIN NAVIGATOR TABS ---
 tab_nav, tab_global = st.tabs(["Local Precinct Analysis", "Global Destination Vulnerability Index"])
@@ -530,13 +494,11 @@ sel_lat, sel_lon = city_row['Lat'], city_row['Lon']
 is_dp = ("Australia" in st.session_state.selected_city)
 season_txt = "Jun-Aug" if sel_lat > 0 else "Dec-Feb"
 
-# Variables for AI Context
 current_lst_max = 0.0
 current_status = "SAFE"
 current_tourist_pct = 0.0
 
 # --- THE 3 PILLARS (REBALANCED LAYOUT) ---
-# Column 1 gets 60%, Column 2 gets 40% for better spatial emphasis
 c1, c2 = st.columns([1.2, 0.8], gap="large")
 
 with c1:
@@ -552,51 +514,97 @@ with c1:
 
     st.markdown(f'<span class="subtitle-text"><b>Data Source:</b> Landsat 8 TIRS. Peak summer ({season_txt}) thermal signatures for {st.session_state.selected_year}.</span>', unsafe_allow_html=True)
     
+    # Pure Folium Map Rendering
+    m_base = folium.Map(location=[sel_lat, sel_lon], zoom_start=12, control_scale=True)
+    folium.TileLayer('CartoDB positron', name="Light Map", control=False).add_to(m_base)
+    
     if not st.session_state.rf_downscale_run:
         with st.spinner(f"Extracting Spatial Analytics for {st.session_state.selected_year}..."):
-            map_html, base_stats = gen_baseline_map(sel_lat, sel_lon, st.session_state.selected_year, gee_status)
-        components.html(map_html, height=430)
-        
-        st.markdown("##### Regional Baseline LST Panel (100m)")
-        sc1, sc2, sc3, sc4 = st.columns(4)
-        sc1.metric("Coolest Area", f"{base_stats['min']} °C")
-        sc2.metric("Median Temp", f"{base_stats['median']} °C")
-        sc3.metric("Average Temp", f"{base_stats['mean']} °C")
-        sc4.metric("Peak Hotspot", f"{base_stats['max']} °C")
-        
-        current_lst_max = float(base_stats['max'])
-        
-        # Inject Average Temp into simulator if state is default
-        if base_stats['mean'] > 0 and st.session_state.temp_source in ["Default", "Native LST"]: 
-            st.session_state.temp_slider = float(base_stats['mean'])
-            st.session_state.sim_temp = float(base_stats['mean'])
-            st.session_state.temp_source = "Native LST"
-        
-        st.markdown("<hr style='margin: 15px 0; border-color: #E2E8F0;'>", unsafe_allow_html=True)
-        st.markdown('<div class="btn-ml">', unsafe_allow_html=True)
-        if st.button("Run Spatial Downscaling Model (100m to 20m)"):
-            st.session_state.rf_downscale_run = True
-            st.session_state.sim_year_label = "Custom Baseline"
-            st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
-        
+            lst_100m, base_stats, roi = get_ee_baseline_data(sel_lat, sel_lon, st.session_state.selected_year, gee_status)
+            
+        if lst_100m is not None:
+            vis_params = {'min': 25, 'max': 50, 'palette': ['#ffffb2', '#fed976', '#feb24c', '#fd8d3c', '#fc4e2a', '#e31a1c', '#b10026']}
+            map_id_dict = ee.Image(lst_100m.clip(roi)).getMapId(vis_params)
+            folium.TileLayer(
+                tiles=map_id_dict['tile_fetcher'].url_format, attr='Map Data &copy; Google Earth Engine', name='Baseline LST (100m)', overlay=True, opacity=0.8
+            ).add_to(m_base)
+            
+            # Map Rendering with Streamlit-Folium (enabling click inspector without geemap overhead)
+            map_output = st_folium(m_base, height=430, use_container_width=True, returned_objects=["last_clicked"])
+            
+            # Live Inspector Logic
+            if map_output and map_output.get("last_clicked"):
+                c_lat = map_output["last_clicked"]["lat"]
+                c_lon = map_output["last_clicked"]["lng"]
+                c_pt = ee.Geometry.Point([c_lon, c_lat])
+                try:
+                    val = lst_100m.sample(c_pt, scale=100).first().getInfo()
+                    if val:
+                        v_str = f"{val['properties']['LST']:.1f}"
+                        st.markdown(f'<div class="inspector-box">📍 <b>Coordinates:</b> {c_lat:.4f}, {c_lon:.4f} &nbsp;|&nbsp; 🌡️ <b>Baseline LST:</b> {v_str} °C</div>', unsafe_allow_html=True)
+                    else:
+                        st.markdown(f'<div class="inspector-box" style="color: #94A3B8;">📍 <b>Coordinates:</b> {c_lat:.4f}, {c_lon:.4f} &nbsp;|&nbsp; No data at this location.</div>', unsafe_allow_html=True)
+                except Exception:
+                    pass
+
+            st.markdown("##### Regional Baseline LST Panel (100m)")
+            sc1, sc2, sc3, sc4 = st.columns(4)
+            sc1.metric("Coolest Area", f"{base_stats['min']} °C")
+            sc2.metric("Median Temp", f"{base_stats['median']} °C")
+            sc3.metric("Average Temp", f"{base_stats['mean']} °C")
+            sc4.metric("Peak Hotspot", f"{base_stats['max']} °C")
+            
+            current_lst_max = float(base_stats['max'])
+            
+            if base_stats['mean'] > 0 and st.session_state.temp_source in ["Default", "Native LST"]: 
+                st.session_state.temp_slider = float(base_stats['mean'])
+                st.session_state.sim_temp = float(base_stats['mean'])
+                st.session_state.temp_source = "Native LST"
+            
+            st.markdown("<hr style='margin: 15px 0; border-color: #E2E8F0;'>", unsafe_allow_html=True)
+            st.markdown('<div class="btn-ml">', unsafe_allow_html=True)
+            st.button("Run Spatial Downscaling Model (100m to 20m)", on_click=on_downscale_click)
+            st.markdown('</div>', unsafe_allow_html=True)
+        else:
+            st.warning("Insufficient satellite data for this period/location.")
     else:
-        with st.spinner("Executing Machine Learning Downscaling (~15s). Slide the center bar to compare Native vs Downscaled maps..."):
+        with st.spinner("Executing Machine Learning Downscaling. Processing high-res predictors..."):
             if st.session_state.rf_results is None:
-                map_html_rf, df_ev, rmse, r2, dict_imp, comp_stats = run_rf_downscaling_split(sel_lat, sel_lon, st.session_state.selected_year)
-                st.session_state.rf_results = (map_html_rf, df_ev, rmse, r2, dict_imp, comp_stats)
+                lst_100m, lst_20m, df_eval, rmse, r2, dict_imp, comp_stats, roi = get_ee_downscaled_data(sel_lat, sel_lon, st.session_state.selected_year, gee_status)
+                st.session_state.rf_results = (lst_100m, lst_20m, df_eval, rmse, r2, dict_imp, comp_stats, roi)
             else:
-                map_html_rf, df_ev, rmse, r2, dict_imp, comp_stats = st.session_state.rf_results
+                lst_100m, lst_20m, df_eval, rmse, r2, dict_imp, comp_stats, roi = st.session_state.rf_results
                 
-        if map_html_rf is not None:
-            components.html(map_html_rf, height=450)
+        if lst_100m is not None:
+            vis_params = {'min': 25, 'max': 50, 'palette': ['#ffffb2', '#fed976', '#feb24c', '#fd8d3c', '#fc4e2a', '#e31a1c', '#b10026']}
+            left_id = ee.Image(lst_100m.clip(roi)).getMapId(vis_params)
+            right_id = ee.Image(lst_20m.clip(roi)).getMapId(vis_params)
+            
+            left_tile = folium.TileLayer(tiles=left_id['tile_fetcher'].url_format, attr='GEE', name='Native 100m', overlay=True, opacity=0.9).add_to(m_base)
+            right_tile = folium.TileLayer(tiles=right_id['tile_fetcher'].url_format, attr='GEE', name='Downscaled 20m', overlay=True, opacity=0.9).add_to(m_base)
+            SideBySideLayers(left_tile, right_tile).add_to(m_base)
+            
+            map_output = st_folium(m_base, height=450, use_container_width=True, returned_objects=["last_clicked"])
+            
+            # Live Inspector Logic (Comparing both layers)
+            if map_output and map_output.get("last_clicked"):
+                c_lat = map_output["last_clicked"]["lat"]
+                c_lon = map_output["last_clicked"]["lng"]
+                c_pt = ee.Geometry.Point([c_lon, c_lat])
+                try:
+                    val_100 = lst_100m.sample(c_pt, scale=100).first().getInfo()
+                    val_20 = lst_20m.sample(c_pt, scale=20).first().getInfo()
+                    v1_str = f"{val_100['properties']['LST']:.1f}" if val_100 else "N/A"
+                    v2_str = f"{val_20['properties']['Predicted_LST']:.1f}" if val_20 else "N/A"
+                    st.markdown(f'<div class="inspector-box">📍 <b>Coordinates:</b> {c_lat:.4f}, {c_lon:.4f} &nbsp;|&nbsp; 🌡️ <b>Native:</b> {v1_str} °C &nbsp;|&nbsp; <b>Downscaled:</b> {v2_str} °C</div>', unsafe_allow_html=True)
+                except Exception:
+                    pass
             
             st.markdown("##### LST Extracted Statistics: Native vs Downscaled")
-            st.markdown('<span class="subtitle-text">Notice how the downscaled 20m model may detect higher extreme localized temperatures (Hotspots) missed by the 100m baseline, while smoothing anomalous out-of-bounds pixels.</span>', unsafe_allow_html=True)
+            st.markdown('<span class="subtitle-text">Notice how the downscaled 20m model may detect lower or higher extreme localized temperatures (Hotspots) missed by the 100m baseline, while smoothing anomalous out-of-bounds pixels.</span>', unsafe_allow_html=True)
             
             current_lst_max = float(comp_stats['d_max'])
             
-            # Inject Downscaled Average Temp into simulator
             if st.session_state.temp_source in ["Default", "Native LST", "Downscaled LST"]:
                 st.session_state.temp_slider = float(comp_stats['d_mean'])
                 st.session_state.sim_temp = float(comp_stats['d_mean'])
@@ -612,8 +620,8 @@ with c1:
                 st.markdown("<i>Note: In Random Forest spatial regression, extreme thermal outliers in 100m native pixels might be smoothed down in 20m predictions if unsupported by the predictors (NDVI/NDBI/DEM). This is a known Remote Sensing phenomenon called Regression to the Mean.</i>", unsafe_allow_html=True)
                 c_rf1, c_rf2 = st.columns(2)
                 with c_rf1:
-                    fig_s = px.scatter(df_ev, x='Actual', y='Predicted', title=f"Spatial R²: {r2:.2f} | RMSE: {rmse:.2f} °C")
-                    mn, mx = min(df_ev['Actual']), max(df_ev['Actual'])
+                    fig_s = px.scatter(df_eval, x='Actual', y='Predicted', title=f"Spatial R²: {r2:.2f} | RMSE: {rmse:.2f} °C")
+                    mn, mx = min(df_eval['Actual']), max(df_eval['Actual'])
                     fig_s.add_shape(type='line', x0=mn, y0=mn, x1=mx, y1=mx, line=dict(color='red', dash='dash'))
                     fig_s.update_layout(height=200, margin=dict(t=30, b=0, l=0, r=0), paper_bgcolor='rgba(0,0,0,0)')
                     st.plotly_chart(fig_s, use_container_width=True, config={'displayModeBar': False})
@@ -623,13 +631,10 @@ with c1:
                     fig_i.update_layout(height=200, margin=dict(t=30, b=0, l=0, r=0), paper_bgcolor='rgba(0,0,0,0)')
                     st.plotly_chart(fig_i, use_container_width=True, config={'displayModeBar': False})
         else:
-            st.error("Spatial downscaling failed due to Google Earth Engine timeout or lack of satellite data for this region.")
+            st.error("Spatial downscaling failed due to GEE timeout or lack of satellite data for this region.")
             
-        if st.button("Back to Baseline Map"):
-            st.session_state.rf_downscale_run = False
-            st.session_state.rf_results = None
-            st.session_state.temp_source = "Default"
-            st.rerun()
+        if st.button("Back to Baseline Map", on_click=on_back_click):
+            pass
 
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -655,6 +660,7 @@ with c2:
                 st.session_state.sim_temp = new_temp
                 st.session_state.sim_year_label = str(new_year)
                 st.session_state.temp_source = "CMIP6"
+                st.session_state.run_ai = False
                 st.rerun() 
     st.markdown('</div>', unsafe_allow_html=True)
     
@@ -674,7 +680,7 @@ with c2:
 
         sim_tmp = st.slider("Forecasted Maximum Temperature (°C)", min_value=15.0, max_value=55.0, key="temp_slider", on_change=on_slider_change)
         sim_hw = 1 if sim_tmp >= 35.0 else 0
-        sim_hol = st.radio("Tourism Seasonality Exposure", [1, 0], format_func=lambda x: f"Peak Tourist Season ({season_txt})" if x==1 else "Off-Peak Season", horizontal=True)
+        sim_hol = st.radio("Tourism Seasonality Exposure", [1, 0], format_func=lambda x: f"Peak Tourist Season ({season_txt})" if x==1 else "Off-Peak Season", horizontal=True, on_change=lambda: st.session_state.update(run_ai=False))
         
         city_tourists = city_row['Tourists_M']
         demographic_scale = city_tourists / 12.0
@@ -692,16 +698,10 @@ with c2:
         if sim_hw: 
             t_dist = [tot_pax*0.12, tot_pax*0.38, tot_pax*0.35, tot_pax*0.15] 
             
-        df_trg = pd.DataFrame({
-            'Category': ['Resuscitation', 'Emergency', 'Urgent', 'Non-Urgent'], 
-            'Cases': t_dist
-        })
+        df_trg = pd.DataFrame({'Category': ['Resuscitation', 'Emergency', 'Urgent', 'Non-Urgent'], 'Cases': t_dist})
         
-        fig_t = px.bar(df_trg, x='Cases', y=['Capacity Load']*4, color='Category', orientation='h',
-                       color_discrete_sequence=['#9B2C2C', '#DD6B20', '#ECC94B', '#48BB78'])
-        fig_t.update_layout(barmode='stack', margin=dict(t=10, b=0, l=0, r=0), height=110, 
-                            yaxis_title=None, xaxis_title=None, showlegend=True,
-                            legend=dict(orientation="h", yanchor="bottom", y=-0.8, xanchor="center", x=0.5))
+        fig_t = px.bar(df_trg, x='Cases', y=['Capacity Load']*4, color='Category', orientation='h', color_discrete_sequence=['#9B2C2C', '#DD6B20', '#ECC94B', '#48BB78'])
+        fig_t.update_layout(barmode='stack', margin=dict(t=10, b=0, l=0, r=0), height=110, yaxis_title=None, xaxis_title=None, showlegend=True, legend=dict(orientation="h", yanchor="bottom", y=-0.8, xanchor="center", x=0.5))
         fig_t.update_yaxes(showticklabels=False)
         st.plotly_chart(fig_t, use_container_width=True, config={'displayModeBar': False})
         
@@ -723,7 +723,7 @@ with c2:
         st.info("Please select an Australian city from the dropdown to unlock the full integration.")
         st.markdown('</div>', unsafe_allow_html=True)
 
-# --- PILLAR 4: AI STRATEGIC POLICY ADVISOR (FULL WIDTH) ---
+# --- PILLAR 4: AI STRATEGIC POLICY ADVISOR ---
 if is_dp:
     st.markdown('<div class="modern-card">', unsafe_allow_html=True)
     st.subheader("4. AI-Driven Strategic Policy Advisor")
@@ -754,12 +754,7 @@ if is_dp:
             with st.spinner("Analyzing current variables via Google Gemini LLM..."):
                 target_year = st.session_state.sim_year_label if st.session_state.sim_year_label not in ["Manual", "Composite Baseline"] else "Current Baseline"
                 ai_response = get_ai_policy_insights(
-                    city=st.session_state.selected_city, 
-                    temp=st.session_state.sim_temp, 
-                    year=target_year, 
-                    status=current_status, 
-                    tourist_pct=current_tourist_pct, 
-                    lst_max=current_lst_max
+                    city=st.session_state.selected_city, temp=st.session_state.sim_temp, year=target_year, status=current_status, tourist_pct=current_tourist_pct, lst_max=current_lst_max
                 )
                 st.markdown(f'<div class="ai-box">{ai_response}</div>', unsafe_allow_html=True)
         else:
@@ -767,4 +762,5 @@ if is_dp:
 
     st.markdown('</div>', unsafe_allow_html=True)
 
-st.markdown('<div style="text-align: center; margin-top: 50px; margin-bottom: 20px; color: #64748B; font-size: 0.85rem; font-family: \'Plus Jakarta Sans\', sans-serif;">Developed by Akram Sripandam Prihanantya, 2026.</div>', unsafe_allow_html=True)
+st.markdown('<div style="text-align: center; margin-top: 50px; color: #94A3B8; font-size: 0.75rem; font-family: \'Inter\', sans-serif;">Disclaimer: The AI-generated insights and spatial models provided by the V-HEAT tool are for supplementary analytical context only and should not replace primary clinical, meteorological, or authoritative local data.</div>', unsafe_allow_html=True)
+st.markdown('<div style="text-align: center; margin-top: 10px; margin-bottom: 20px; color: #64748B; font-size: 0.85rem; font-family: \'Inter\', sans-serif;">Developed by Akram Sripandam Prihanantya, 2026.</div>', unsafe_allow_html=True)
