@@ -4,6 +4,15 @@ import ee
 import json
 import warnings
 import os
+import pandas as pd
+import numpy as np
+import plotly.express as px
+import plotly.graph_objects as go
+import joblib
+from sklearn.metrics import mean_squared_error, r2_score
+import geemap.foliumap as geemap
+import folium
+from folium.plugins import SideBySideLayers
 
 # =====================================================================
 # HOTFIX PATCH & WARNING SUPPRESSION
@@ -13,46 +22,55 @@ warnings.filterwarnings("ignore")
 if hasattr(ee, 'data') and not hasattr(ee.data, '_credentials'):
     ee.data._credentials = None
 
-import geemap.foliumap as geemap
-import folium
-from folium.plugins import SideBySideLayers
-import pandas as pd
-import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
-import joblib
-from sklearn.metrics import mean_squared_error, r2_score
-
 # =====================================================================
-# 1. PAGE CONFIG & MODERN UX
+# 1. PAGE CONFIG & MODERN UX (CSS ANIMATIONS)
 # =====================================================================
 st.set_page_config(page_title="V-HEAT: Destination Resilience", layout="wide", initial_sidebar_state="collapsed")
 
 css = """
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap');
-    html, body, [class*="css"]  { font-family: 'Plus Jakarta Sans', sans-serif; }
+    html, body, [class*="css"]  { font-family: 'Plus Jakarta Sans', sans-serif; scroll-behavior: smooth; }
     .stApp { background-color: #F8FAFC; color: #1E293B; }
     
-    .modern-card { background-color: #FFFFFF; border-radius: 12px; border: 1px solid #E2E8F0; padding: 25px; margin-bottom: 20px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
-    .header-card { background: linear-gradient(135deg, #0F172A 0%, #1E3A8A 100%); color: white; border-radius: 12px; padding: 40px 30px; margin-bottom: 25px; }
+    /* Smooth entrance animation for all cards */
+    @keyframes slideUpFade {
+        from { opacity: 0; transform: translateY(15px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+    
+    .modern-card { 
+        background-color: #FFFFFF; border-radius: 12px; border: 1px solid #E2E8F0; padding: 25px; margin-bottom: 20px; 
+        box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);
+        animation: slideUpFade 0.5s ease-out forwards;
+        transition: all 0.3s ease;
+    }
+    .modern-card:hover { box-shadow: 0 10px 15px -3px rgba(0,0,0,0.08); transform: translateY(-2px); }
+    
+    .header-card { 
+        background: linear-gradient(135deg, #0F172A 0%, #1E3A8A 100%); color: white; border-radius: 12px; padding: 40px 30px; margin-bottom: 25px; 
+        animation: slideUpFade 0.4s ease-out forwards;
+    }
     .header-card h1 { color: white !important; margin-top: 0; font-weight: 700; font-size: 2.4rem; letter-spacing: -0.02em; }
     .header-card p { color: #CBD5E1; font-size: 1.15rem; max-width: 900px; line-height: 1.6; margin-bottom: 0;}
     
     h2, h3, h4 { font-weight: 600 !important; color: #0F172A; }
     .subtitle-text { font-size: 0.95rem; color: #64748B; margin-bottom: 15px; display: block; }
     
-    div[data-testid="stMetricValue"] { font-size: 1.8rem; font-weight: 700; color: #1E3A8A; }
+    div[data-testid="stMetricValue"] { font-size: 1.8rem; font-weight: 700; color: #1E3A8A; transition: color 0.3s ease; }
     div[data-testid="stMetricLabel"] { font-size: 0.95rem; font-weight: 600; color: #475569; }
     div[data-testid="stMetricDelta"] { font-size: 0.9rem; font-weight: 500; }
     
-    .status-badge { padding: 8px 16px; border-radius: 20px; font-weight: 600; font-size: 0.9rem; display: inline-block; margin-top: 10px;}
-    .status-safe { background-color: #DEF7EC; color: #22543D; border: 1px solid #9AE6B4; }
-    .status-warn { background-color: #FEFCBF; color: #744210; border: 1px solid #F6E05E; }
-    .status-critical { background-color: #FED7D7; color: #822727; border: 1px solid #FEB2B2; }
+    .status-badge { padding: 10px 16px; border-radius: 8px; font-weight: 600; font-size: 0.95rem; display: block; margin-top: 15px; width: 100%; text-align: center; transition: all 0.3s ease;}
+    .status-safe { background-color: #DEF7EC; color: #03543F; border: 1px solid #31C48D; }
+    .status-warn { background-color: #FEF08A; color: #744210; border: 1px solid #F6E05E; }
+    .status-critical { background-color: #FBD5D5; color: #9B2C2C; border: 1px solid #FC8181; }
     
-    .btn-ml > button { width: 100%; font-weight: 600; background-color: #1E3A8A; color: white; border-radius: 8px; padding: 10px; border: none;}
-    .btn-ml > button:hover { background-color: #1E40AF; color: white; border: none;}
+    .sim-panel { background-color: #E0E7FF; border-left: 4px solid #4338CA; padding: 12px 16px; border-radius: 0 8px 8px 0; font-size: 0.95rem; color: #3730A3; margin-bottom: 15px; animation: slideUpFade 0.3s ease-out forwards; }
+    .sim-panel-manual { background-color: #F1F5F9; border-left: 4px solid #64748B; padding: 12px 16px; border-radius: 0 8px 8px 0; font-size: 0.95rem; color: #475569; margin-bottom: 15px; animation: slideUpFade 0.3s ease-out forwards; }
+    
+    .btn-ml > button { width: 100%; font-weight: 600; background-color: #1E3A8A; color: white; border-radius: 8px; padding: 12px; border: none; transition: all 0.2s ease;}
+    .btn-ml > button:hover { background-color: #1E40AF; color: white; border: none; transform: scale(1.01);}
     
     [data-testid="collapsedControl"] { display: none; }
 </style>
@@ -72,6 +90,8 @@ if 'rf_results' not in st.session_state:
     st.session_state.rf_results = None
 if 'sim_temp' not in st.session_state:
     st.session_state.sim_temp = 35.0
+if 'sim_year_label' not in st.session_state:
+    st.session_state.sim_year_label = "Custom Baseline"
 
 # =====================================================================
 # 3. CORE FUNCTIONS (GEE & ML)
@@ -142,7 +162,6 @@ def gen_baseline_map(lat, lon, year, gee_ready):
     try:
         pt = ee.Geometry.Point([lon, lat])
         roi = pt.buffer(8000) 
-        
         month_filter = ee.Filter.calendarRange(6, 8, 'month') if lat > 0 else ee.Filter.calendarRange(12, 2, 'month')
             
         l8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2").filterBounds(roi).filterDate(f'{year}-01-01', f'{year}-12-31').filter(month_filter)
@@ -153,7 +172,6 @@ def gen_baseline_map(lat, lon, year, gee_ready):
                 return img.updateMask(mask)
                 
             lst_100m = l8.map(mask_l8).median().select('ST_B10').multiply(0.00341802).add(149.0).subtract(273.15).rename('LST')
-            
             valid_mask = lst_100m.gt(5).And(lst_100m.lt(55))
             lst_100m = lst_100m.updateMask(valid_mask)
             
@@ -177,7 +195,6 @@ def run_rf_downscaling_split(lat, lon, year):
     try:
         pt = ee.Geometry.Point([lon, lat])
         roi = pt.buffer(8000)
-        
         month_filter = ee.Filter.calendarRange(6, 8, 'month') if lat > 0 else ee.Filter.calendarRange(12, 2, 'month')
         
         l8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2").filterBounds(roi).filterDate(f'{year}-01-01', f'{year}-12-31').filter(month_filter)
@@ -195,7 +212,6 @@ def run_rf_downscaling_split(lat, lon, year):
         slope = ee.Terrain.slope(elev).rename('Slope')
         aspect = ee.Terrain.aspect(elev).rename('Aspect')
         
-        # Use previous years for context if selected year is missing S2
         s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED').filterBounds(roi).filterDate(f'{year}-01-01', f'{year}-12-31').filter(month_filter).filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)).median()
         ndvi = s2.normalizedDifference(['B8', 'B4']).rename('NDVI')
         ndbi = s2.normalizedDifference(['B11', 'B8']).rename('NDBI')
@@ -326,7 +342,7 @@ cty_coords = [
     {"City": "Marrakech, Morocco", "Lat": 31.6295, "Lon": -7.9811, "Tourists_M": 3.0, "Avg_Summer_LST": 40.0, "Continent": "Africa"}
 ]
 df_cities = pd.DataFrame(cty_coords)
-df_cities['Type'] = np.where(df_cities['City'].str.contains('Australia'), 'Primary Study (AU)', 'Global Baseline')
+df_cities['Type'] = np.where(df_cities['City'].str.contains('Australia'), 'Primary Integration (AU)', 'Global Observation')
 
 # =====================================================================
 # 5. APP LAYOUT & PRESENTATION LAYER
@@ -335,6 +351,20 @@ st.markdown('<div class="header-card">', unsafe_allow_html=True)
 st.markdown("<h1>V-HEAT: Destination Infrastructure Resilience Model</h1>", unsafe_allow_html=True)
 st.markdown("<p>An integrated analytical framework linking Earth Observation (GEE), Historical Climate baselines (BoM), Future Projections (NASA CMIP6), and Public Health infrastructure to assess tourism destination carrying capacity under extreme heat.</p>", unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
+
+with st.expander("📖 Architecture, Methodology & Transparent Data Sources"):
+    st.markdown("""
+    **Core Data Sources & Hyperlinks:**
+    * **Public Health Data:** [Australian Institute of Health and Welfare (AIHW) ED API](https://myhospitalsapi.aihw.gov.au/api/v1/measure-downloads/myh-ed).
+    * **Historical Climate Data:** [Bureau of Meteorology (BoM) AWS SILO Open Data](https://s3-ap-southeast-2.amazonaws.com/silo-open-data/Official/annual/index.html).
+    * **Spatial Data:** Landsat 8 TIRS & Sentinel-2 Harmonized via Google Earth Engine API.
+    * **Climate Forecasts:** NASA NEX-GDDP-CMIP6 (Scenario SSP5-8.5).
+    
+    **Analytical Pipeline Notes:**
+    * **Spatial Downscaling:** Transforms native 100m thermal resolution to 20m utilizing Random Forest ML driven by Sentinel-2 predictors (NDVI, NDBI, DEM).
+    * **Demographic Scaling Factor (PoC Assumption):** Because this Proof of Concept trains its Machine Learning baseline exclusively on the Gold Coast (12 Million annual tourists), simulating capacity for other Australian cities utilizes a synthetic scaling multiplier. This multiplier compares local tourist volume against the Gold Coast baseline to proportionally scale the hospital bed footprint. 
+    * *Tourist volumes for the global matrix are synthesized estimates benchmarking the Mastercard Global Destination Cities Index.*
+    """)
 
 mdl = load_ml_mdl()
 gee_status = init_ee()
@@ -358,26 +388,24 @@ with tab_nav:
         if "Australia" in st.session_state.selected_city:
             st.markdown("**Status:** 🟢 Full Integration Active (Remote Sensing + Local Health Data + NASA CMIP6 Forecast)")
         else:
-            st.markdown("**Status:** 🔵 Partial Mode (Remote Sensing + NASA CMIP6 Forecast Only).")
+            st.markdown("**Status:** 🔵 Partial Integration (Remote Sensing + NASA CMIP6 Forecast Only). Health simulator locked.")
     st.markdown('</div>', unsafe_allow_html=True)
 
 # TAB GLOBAL 50 CITIES CHART
 with tab_global:
     st.markdown('<div class="modern-card">', unsafe_allow_html=True)
     st.markdown("### 📊 Global Tourism Vulnerability Matrix")
-    st.markdown("Comparative analysis of 50 global destinations mapping tourist volume against extreme summer surface temperatures.")
+    st.markdown("Comparative analysis mapping tourist volume against extreme summer surface temperatures. Data synthesized for PoC.")
     
     fig_global = px.scatter(df_cities, x='Avg_Summer_LST', y='Tourists_M', size='Tourists_M', color='Type', 
-                            hover_name='City', size_max=40, opacity=0.7,
-                            labels={'Avg_Summer_LST': 'Historical Average Summer LST (°C)', 'Tourists_M': 'Annual Tourists (Millions)'},
-                            color_discrete_map={"Primary Study (AU)": "#E53E3E", "Global Baseline": "#3182CE"})
+                            hover_name='City', size_max=40, opacity=0.8,
+                            labels={'Avg_Summer_LST': 'Average Summer LST (°C)', 'Tourists_M': 'Annual Tourists (Millions)'},
+                            color_discrete_map={"Primary Integration (AU)": "#1E3A8A", "Global Observation": "#94A3B8"})
     fig_global.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=10, b=10, l=10, r=10), height=400)
     fig_global.add_hline(y=10, line_dash="dot", line_color="gray")
-    fig_global.add_vline(x=35, line_dash="dot", line_color="red")
-    fig_global.add_annotation(x=42, y=25, text="High Risk Zone", showarrow=False, font=dict(color="red", size=14))
+    fig_global.add_vline(x=35, line_dash="dot", line_color="#E53E3E")
+    fig_global.add_annotation(x=42, y=25, text="High Risk Zone", showarrow=False, font=dict(color="#E53E3E", size=14, weight="bold"))
     st.plotly_chart(fig_global, use_container_width=True, config={'displayModeBar': False})
-    
-    st.markdown("""<div style='font-size:0.8rem; color:#64748B;'><i><b>Data Disclaimer:</b> Annual tourist volumes are synthetic estimates derived from historical global indexes (e.g., Mastercard Global Destination Cities Index) for Proof of Concept purposes. Average LST values represent a static GEE baseline abstraction.</i></div>""", unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
 city_row = df_cities[df_cities['City'] == st.session_state.selected_city].iloc[0]
@@ -393,7 +421,6 @@ c1, c2 = st.columns([1.1, 0.9], gap="large")
 with c1:
     st.markdown('<div class="modern-card">', unsafe_allow_html=True)
     
-    # OUT OF THE BOX: Time Slider untuk Analisis Historis
     row_title, row_slider = st.columns([2, 1])
     with row_title:
         st.subheader("1. Spatial Hazard Exposure")
@@ -402,15 +429,15 @@ with c1:
         if new_year != st.session_state.selected_year:
             st.session_state.selected_year = new_year
             st.session_state.rf_downscale_run = False 
+            st.session_state.sim_year_label = "Custom Baseline"
             st.rerun()
 
-    st.markdown(f'<span class="subtitle-text"><b>Data Source:</b> Landsat 8 TIRS. Peak summer ({season_txt}) thermal signatures for the year {st.session_state.selected_year}.</span>', unsafe_allow_html=True)
+    st.markdown(f'<span class="subtitle-text"><b>Data Source:</b> Landsat 8 TIRS. Peak summer ({season_txt}) thermal signatures for {st.session_state.selected_year}.</span>', unsafe_allow_html=True)
     
     # KONDISI 1: PETA BASELINE
     if not st.session_state.rf_downscale_run:
         with st.spinner(f"Extracting Spatial Analytics for {st.session_state.selected_year}..."):
             map_html, base_stats = gen_baseline_map(sel_lat, sel_lon, st.session_state.selected_year, gee_status)
-        st.toast(f"Spatial analytics for {st.session_state.selected_city} extracted successfully!", icon="✅")
         components.html(map_html, height=430)
         
         st.markdown("##### 📍 Regional Baseline LST Panel (100m)")
@@ -419,8 +446,7 @@ with c1:
         sc2.metric("Average Temp", f"{base_stats['mean']} °C")
         sc3.metric("Peak Hotspot", f"{base_stats['max']} °C")
         
-        # Inject the Average Temp from the map into the simulator!
-        if base_stats['mean'] > 0 and st.session_state.sim_temp == 35.0: # Only override if it's the default
+        if base_stats['mean'] > 0 and st.session_state.sim_year_label == "Custom Baseline": 
             st.session_state.sim_temp = float(base_stats['mean'])
         
         st.markdown("<hr style='margin: 15px 0; border-color: #E2E8F0;'>", unsafe_allow_html=True)
@@ -440,14 +466,13 @@ with c1:
                 map_html_rf, df_ev, rmse, r2, dict_imp, comp_stats = st.session_state.rf_results
                 
         if map_html_rf is not None:
-            st.toast("Machine Learning Spatial Downscaling completed!", icon="✅")
             components.html(map_html_rf, height=450)
             
             st.markdown("##### 📊 LST Extracted Statistics: Native vs Downscaled")
             st.markdown('<span class="subtitle-text">Notice how the downscaled 20m model may detect higher extreme localized temperatures (Hotspots) missed by the 100m baseline, while smoothing anomalous out-of-bounds pixels (Regression to the mean).</span>', unsafe_allow_html=True)
             
-            # Inject Downscaled Max into the Simulator
-            st.session_state.sim_temp = float(comp_stats['d_max'])
+            if st.session_state.sim_year_label == "Custom Baseline":
+                st.session_state.sim_temp = float(comp_stats['d_max'])
             
             s1, s2, s3 = st.columns(3)
             s1.metric("Coolest Area (20m)", f"{comp_stats['d_min']} °C", f"{round(comp_stats['d_min'] - comp_stats['n_min'], 1)} °C vs Native", delta_color="inverse")
@@ -480,37 +505,46 @@ with c1:
 
 # PILLAR 2 & 3: IKLIM & INFRASTRUKTUR
 with c2:
+    # PILLAR 2: Terbuka untuk seluruh Dunia!
+    st.markdown('<div class="modern-card">', unsafe_allow_html=True)
+    st.subheader("2. Future Climate Projections (CMIP6)")
+    st.markdown('<span class="subtitle-text">NASA NEX-GDDP (Model: ACCESS-CM2). <b>Select a projected year on the chart</b> to automatically load its temperature into the Infrastructure Simulator below.</span>', unsafe_allow_html=True)
+    
+    with st.spinner("Querying NASA CMIP6 Database..."):
+        df_cmip = get_real_cmip6_data(sel_lat, sel_lon, gee_status)
+    
+    fig2 = go.Figure(go.Scatter(x=df_cmip['Year'], y=df_cmip['Max_Temp'], mode='lines+markers', customdata=df_cmip['Max_Temp'], fill='tozeroy', fillcolor='rgba(229, 62, 62, 0.1)', line=dict(color='#E53E3E', width=3)))
+    fig2.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font_color='#1E293B', yaxis_title="Max Air Temp (°C)", margin=dict(t=5, b=5, l=0, r=0), height=150)
+    
+    cmip_sel = st.plotly_chart(fig2, on_select="rerun", selection_mode="points", use_container_width=True, key="cmip_chart")
+    if cmip_sel and hasattr(cmip_sel, 'selection'):
+        pts = cmip_sel.selection.get('points', [])
+        if pts and len(pts) > 0:
+            new_temp = float(pts[0].get('customdata'))
+            new_year = int(pts[0].get('x'))
+            if st.session_state.sim_temp != new_temp:
+                st.session_state.sim_temp = new_temp
+                st.session_state.sim_year_label = str(new_year)
+                st.rerun() 
+    st.markdown('</div>', unsafe_allow_html=True)
+    
+    # PILLAR 3: Hanya terbuka untuk Australia
     if is_dp:
         st.markdown('<div class="modern-card">', unsafe_allow_html=True)
-        st.subheader("2. Future Climate Projections (CMIP6)")
-        st.markdown('<span class="subtitle-text">NASA NEX-GDDP (Model: ACCESS-CM2). <b>Select a projected year on the chart</b> to automatically load its temperature into the Infrastructure Simulator below.</span>', unsafe_allow_html=True)
-        
-        with st.spinner("Querying NASA CMIP6 Database..."):
-            df_cmip = get_real_cmip6_data(sel_lat, sel_lon, gee_status)
-        
-        fig2 = go.Figure(go.Scatter(x=df_cmip['Year'], y=df_cmip['Max_Temp'], mode='lines+markers', customdata=df_cmip['Max_Temp'], fill='tozeroy', fillcolor='rgba(229, 62, 62, 0.1)', line=dict(color='#E53E3E', width=3)))
-        fig2.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font_color='#1E293B', yaxis_title="Max Air Temp (°C)", margin=dict(t=5, b=5, l=0, r=0), height=150)
-        
-        cmip_sel = st.plotly_chart(fig2, on_select="rerun", selection_mode="points", use_container_width=True, key="cmip_chart")
-        if cmip_sel and hasattr(cmip_sel, 'selection'):
-            pts = cmip_sel.selection.get('points', [])
-            if pts and len(pts) > 0:
-                new_temp = float(pts[0].get('customdata'))
-                if st.session_state.sim_temp != new_temp:
-                    st.session_state.sim_temp = new_temp
-                    # UI SYNC: Toast only appears when the simulator is physically updated
-                    st.toast(f"Simulator infrastructure scenario updated to {new_temp:.1f}°C based on CMIP6.", icon="✅")
-                    st.rerun() # Force sync slider UI immediately
-        
-        st.markdown("<hr style='margin: 25px 0; border-color: #E2E8F0;'>", unsafe_allow_html=True)
-        
         st.subheader("3. Destination Capacity Simulator (BoM + Hospital Data)")
         st.markdown('<span class="subtitle-text">Machine Learning trained on historical BoM weather & hospital records. Simulates how localized heat extremes and tourist seasons impact infrastructure carrying capacity.</span>', unsafe_allow_html=True)
         
+        # SMART UX: Dynamic Panel for Simulator Status
+        if st.session_state.sim_year_label != "Custom Baseline":
+            st.markdown(f'<div class="sim-panel">📌 <b>Simulation Active:</b> Applying CMIP6 forecast for the year <b>{st.session_state.sim_year_label}</b> at <b>{st.session_state.sim_temp:.1f}°C</b>.</div>', unsafe_allow_html=True)
+        else:
+            st.markdown(f'<div class="sim-panel-manual">⚙️ <b>Manual Baseline Mode:</b> Analyzing current spatial extraction limits. Move slider to override.</div>', unsafe_allow_html=True)
+
         def on_slider_change():
             st.session_state.sim_temp = st.session_state.temp_slider
+            st.session_state.sim_year_label = "Custom Baseline"
             
-        sim_tmp = st.slider("Simulate Maximum Temperature (°C)", min_value=25.0, max_value=48.0, value=float(st.session_state.sim_temp), step=0.1, key="temp_slider", on_change=on_slider_change)
+        sim_tmp = st.slider("Forecasted Maximum Temperature (°C)", min_value=25.0, max_value=48.0, value=float(st.session_state.sim_temp), step=0.1, key="temp_slider", on_change=on_slider_change)
         sim_hw = 1 if sim_tmp >= 35.0 else 0
         sim_hol = st.radio("Tourism Seasonality Exposure", [1, 0], format_func=lambda x: f"Peak Tourist Season ({season_txt})" if x==1 else "Off-Peak Season", horizontal=True)
         
