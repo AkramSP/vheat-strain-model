@@ -75,6 +75,10 @@ css = """
     .ai-box { background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 6px; padding: 20px; font-size: 0.95rem; line-height: 1.6; color: #334155; }
     .inspector-box { background-color: #FFFFFF; border-left: 3px solid #0F172A; padding: 10px 15px; margin-bottom: 15px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); font-size: 0.9rem; color: #1E293B;}
     
+    /* Out of the Box: Fix for oversized Leaflet attribution font */
+    .leaflet-control-attribution { font-size: 0.65rem !important; color: #94A3B8 !important; background: rgba(255,255,255,0.7) !important; padding: 0 5px !important;}
+    .leaflet-control-attribution a { color: #64748B !important; }
+    
     [data-testid="collapsedControl"] { display: none; }
 </style>
 """
@@ -541,11 +545,13 @@ with c1:
                     val = lst_100m.sample(c_pt, scale=100).first().getInfo()
                     if val:
                         v_str = f"{val['properties']['LST']:.1f}"
-                        st.markdown(f'<div class="inspector-box">📍 <b>Coordinates:</b> {c_lat:.4f}, {c_lon:.4f} &nbsp;|&nbsp; 🌡️ <b>Baseline LST:</b> {v_str} °C</div>', unsafe_allow_html=True)
+                        st.markdown(f'<div class="inspector-box"><b>Coordinates:</b> {c_lat:.4f}, {c_lon:.4f} &nbsp;|&nbsp; <b>Baseline LST:</b> {v_str} °C</div>', unsafe_allow_html=True)
                     else:
-                        st.markdown(f'<div class="inspector-box" style="color: #94A3B8;">📍 <b>Coordinates:</b> {c_lat:.4f}, {c_lon:.4f} &nbsp;|&nbsp; No data at this location.</div>', unsafe_allow_html=True)
+                        st.markdown(f'<div class="inspector-box" style="color: #94A3B8;"><b>Coordinates:</b> {c_lat:.4f}, {c_lon:.4f} &nbsp;|&nbsp; No data at this location.</div>', unsafe_allow_html=True)
                 except Exception:
-                    pass
+                    st.markdown(f'<div class="inspector-box" style="color: #94A3B8;"><b>Coordinates:</b> {c_lat:.4f}, {c_lon:.4f} &nbsp;|&nbsp; Error retrieving data.</div>', unsafe_allow_html=True)
+            else:
+                st.markdown('<div class="inspector-box" style="color: #94A3B8;"><b>Coordinates:</b> Waiting for map click... &nbsp;|&nbsp; <b>Baseline LST:</b> ---</div>', unsafe_allow_html=True)
 
             st.markdown("##### Regional Baseline LST Panel (100m)")
             sc1, sc2, sc3, sc4 = st.columns(4)
@@ -565,15 +571,15 @@ with c1:
             st.markdown('<div class="btn-ml">', unsafe_allow_html=True)
             st.button("Run Spatial Downscaling Model (100m to 20m)", on_click=on_downscale_click)
             st.markdown('</div>', unsafe_allow_html=True)
-        else:
-            st.warning("Insufficient satellite data for this period/location.")
+        
     else:
         with st.spinner("Executing Machine Learning Downscaling. Processing high-res predictors..."):
-            if st.session_state.rf_results is None:
+            # Robust State Fix: using .get() to prevent AttributeError on callback re-runs
+            if st.session_state.get('rf_results') is None:
                 lst_100m, lst_20m, df_eval, rmse, r2, dict_imp, comp_stats, roi = get_ee_downscaled_data(sel_lat, sel_lon, st.session_state.selected_year, gee_status)
                 st.session_state.rf_results = (lst_100m, lst_20m, df_eval, rmse, r2, dict_imp, comp_stats, roi)
             else:
-                lst_100m, lst_20m, df_eval, rmse, r2, dict_imp, comp_stats, roi = st.session_state.rf_results
+                lst_100m, lst_20m, df_eval, rmse, r2, dict_imp, comp_stats, roi = st.session_state.get('rf_results')
                 
         if lst_100m is not None:
             vis_params = {'min': 25, 'max': 50, 'palette': ['#ffffb2', '#fed976', '#feb24c', '#fd8d3c', '#fc4e2a', '#e31a1c', '#b10026']}
@@ -596,9 +602,11 @@ with c1:
                     val_20 = lst_20m.sample(c_pt, scale=20).first().getInfo()
                     v1_str = f"{val_100['properties']['LST']:.1f}" if val_100 else "N/A"
                     v2_str = f"{val_20['properties']['Predicted_LST']:.1f}" if val_20 else "N/A"
-                    st.markdown(f'<div class="inspector-box">📍 <b>Coordinates:</b> {c_lat:.4f}, {c_lon:.4f} &nbsp;|&nbsp; 🌡️ <b>Native:</b> {v1_str} °C &nbsp;|&nbsp; <b>Downscaled:</b> {v2_str} °C</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="inspector-box"><b>Coordinates:</b> {c_lat:.4f}, {c_lon:.4f} &nbsp;|&nbsp; <b>Native:</b> {v1_str} °C &nbsp;|&nbsp; <b>Downscaled:</b> {v2_str} °C</div>', unsafe_allow_html=True)
                 except Exception:
-                    pass
+                    st.markdown(f'<div class="inspector-box" style="color: #94A3B8;"><b>Coordinates:</b> {c_lat:.4f}, {c_lon:.4f} &nbsp;|&nbsp; Error retrieving data.</div>', unsafe_allow_html=True)
+            else:
+                st.markdown('<div class="inspector-box" style="color: #94A3B8;"><b>Coordinates:</b> Waiting for map click... &nbsp;|&nbsp; <b>Native:</b> --- &nbsp;|&nbsp; <b>Downscaled:</b> ---</div>', unsafe_allow_html=True)
             
             st.markdown("##### LST Extracted Statistics: Native vs Downscaled")
             st.markdown('<span class="subtitle-text">Notice how the downscaled 20m model may detect lower or higher extreme localized temperatures (Hotspots) missed by the 100m baseline, while smoothing anomalous out-of-bounds pixels.</span>', unsafe_allow_html=True)
