@@ -13,6 +13,7 @@ from sklearn.metrics import mean_squared_error, r2_score
 import geemap.foliumap as geemap
 import folium
 from folium.plugins import SideBySideLayers
+import google.generativeai as genai
 
 # =====================================================================
 # HOTFIX PATCH & WARNING SUPPRESSION
@@ -29,8 +30,8 @@ st.set_page_config(page_title="V-HEAT: Destination Resilience", layout="wide", i
 
 css = """
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap');
-    html, body, [class*="css"]  { font-family: 'Plus Jakarta Sans', sans-serif; scroll-behavior: smooth; }
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+    html, body, [class*="css"]  { font-family: 'Inter', sans-serif; scroll-behavior: smooth; }
     .stApp { background-color: #F8FAFC; color: #1E293B; }
     
     @keyframes slideUpFade {
@@ -39,37 +40,39 @@ css = """
     }
     
     .modern-card { 
-        background-color: #FFFFFF; border-radius: 12px; border: 1px solid #E2E8F0; padding: 25px; margin-bottom: 20px; 
-        box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);
-        animation: slideUpFade 0.5s ease-out forwards;
+        background-color: #FFFFFF; border-radius: 8px; border: 1px solid #E2E8F0; padding: 25px; margin-bottom: 20px; 
+        box-shadow: 0 2px 4px rgba(0,0,0,0.02);
+        animation: slideUpFade 0.4s ease-out forwards;
         transition: all 0.3s ease;
     }
-    .modern-card:hover { box-shadow: 0 10px 15px -3px rgba(0,0,0,0.08); transform: translateY(-2px); }
+    .modern-card:hover { box-shadow: 0 8px 12px -3px rgba(0,0,0,0.05); transform: translateY(-1px); }
     
     .header-card { 
-        background: linear-gradient(135deg, #0F172A 0%, #1E3A8A 100%); color: white; border-radius: 12px; padding: 40px 30px; margin-bottom: 25px; 
-        animation: slideUpFade 0.4s ease-out forwards;
+        background: linear-gradient(135deg, #0F172A 0%, #1E3A8A 100%); color: white; border-radius: 8px; padding: 40px 30px; margin-bottom: 25px; 
+        animation: slideUpFade 0.3s ease-out forwards;
     }
-    .header-card h1 { color: white !important; margin-top: 0; font-weight: 700; font-size: 2.4rem; letter-spacing: -0.02em; }
-    .header-card p { color: #CBD5E1; font-size: 1.15rem; max-width: 900px; line-height: 1.6; margin-bottom: 0;}
+    .header-card h1 { color: white !important; margin-top: 0; font-weight: 700; font-size: 2.2rem; letter-spacing: -0.02em; }
+    .header-card p { color: #CBD5E1; font-size: 1.1rem; max-width: 900px; line-height: 1.6; margin-bottom: 0;}
     
     h2, h3, h4 { font-weight: 600 !important; color: #0F172A; }
-    .subtitle-text { font-size: 0.95rem; color: #64748B; margin-bottom: 15px; display: block; }
+    .subtitle-text { font-size: 0.9rem; color: #64748B; margin-bottom: 15px; display: block; line-height: 1.5; }
     
     div[data-testid="stMetricValue"] { font-size: 1.8rem; font-weight: 700; color: #1E3A8A; transition: color 0.3s ease; }
-    div[data-testid="stMetricLabel"] { font-size: 0.95rem; font-weight: 600; color: #475569; }
-    div[data-testid="stMetricDelta"] { font-size: 0.9rem; font-weight: 500; }
+    div[data-testid="stMetricLabel"] { font-size: 0.9rem; font-weight: 600; color: #475569; text-transform: uppercase; letter-spacing: 0.05em; }
+    div[data-testid="stMetricDelta"] { font-size: 0.85rem; font-weight: 500; }
     
-    .status-badge { padding: 10px 16px; border-radius: 8px; font-weight: 600; font-size: 0.95rem; display: block; margin-top: 15px; width: 100%; text-align: center; transition: all 0.3s ease;}
-    .status-safe { background-color: #DEF7EC; color: #03543F; border: 1px solid #31C48D; }
-    .status-warn { background-color: #FEF08A; color: #744210; border: 1px solid #F6E05E; }
-    .status-critical { background-color: #FBD5D5; color: #9B2C2C; border: 1px solid #FC8181; }
+    .status-badge { padding: 12px 16px; border-radius: 4px; font-weight: 700; font-size: 0.9rem; display: block; margin-top: 15px; width: 100%; text-align: center; text-transform: uppercase; letter-spacing: 0.05em; transition: all 0.3s ease;}
+    .status-safe { background-color: #F0FDF4; color: #047857; border: 1px solid #A7F3D0; }
+    .status-warn { background-color: #FEF9C3; color: #B45309; border: 1px solid #FDE047; }
+    .status-critical { background-color: #FEF2F2; color: #B91C1C; border: 1px solid #FECACA; }
     
-    .sim-panel { background-color: #E0E7FF; border-left: 4px solid #4338CA; padding: 12px 16px; border-radius: 0 8px 8px 0; font-size: 0.95rem; color: #3730A3; margin-bottom: 15px; animation: slideUpFade 0.3s ease-out forwards; }
-    .sim-panel-manual { background-color: #F1F5F9; border-left: 4px solid #64748B; padding: 12px 16px; border-radius: 0 8px 8px 0; font-size: 0.95rem; color: #475569; margin-bottom: 15px; animation: slideUpFade 0.3s ease-out forwards; }
+    .sim-panel { background-color: #EFF6FF; border-left: 4px solid #4F46E5; padding: 12px 16px; border-radius: 0 4px 4px 0; font-size: 0.9rem; color: #3730A3; margin-bottom: 15px; animation: slideUpFade 0.3s ease-out forwards; }
+    .sim-panel-manual { background-color: #F8FAFC; border-left: 4px solid #94A3B8; padding: 12px 16px; border-radius: 0 4px 4px 0; font-size: 0.9rem; color: #475569; margin-bottom: 15px; animation: slideUpFade 0.3s ease-out forwards; }
     
-    .btn-ml > button { width: 100%; font-weight: 600; background-color: #1E3A8A; color: white; border-radius: 8px; padding: 12px; border: none; transition: all 0.2s ease;}
+    .btn-ml > button { width: 100%; font-weight: 600; background-color: #1E3A8A; color: white; border-radius: 4px; padding: 10px; border: none; transition: all 0.2s ease;}
     .btn-ml > button:hover { background-color: #1E40AF; color: white; border: none; transform: scale(1.01);}
+    
+    .ai-box { background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 6px; padding: 20px; font-size: 0.95rem; line-height: 1.6; color: #334155; }
     
     [data-testid="collapsedControl"] { display: none; }
 </style>
@@ -77,7 +80,7 @@ css = """
 st.markdown(css, unsafe_allow_html=True)
 
 # =====================================================================
-# 2. SESSION STATE MANAGEMENT (ROBUST STATE SYNC)
+# 2. SESSION STATE MANAGEMENT
 # =====================================================================
 if 'selected_city' not in st.session_state:
     st.session_state.selected_city = "Gold Coast, Australia"
@@ -99,11 +102,10 @@ if 'cmip_chart_key' not in st.session_state:
     st.session_state.cmip_chart_key = 0
 
 # =====================================================================
-# 3. CORE FUNCTIONS (GEE & ML)
+# 3. CORE FUNCTIONS (GEE, ML & LLM)
 # =====================================================================
 @st.cache_resource(show_spinner=False)
 def init_ee():
-    """Initializes Google Earth Engine via Service Account/Token."""
     try:
         if "EARTHENGINE_TOKEN" in st.secrets:
             token_str = st.secrets["EARTHENGINE_TOKEN"].replace('\xa0', ' ').replace('\n', '').strip()
@@ -121,15 +123,41 @@ def init_ee():
 
 @st.cache_resource(show_spinner=False)
 def load_ml_mdl():
-    """Loads the pre-trained Scikit-Learn hospital strain model."""
     p = 'rf_vheat_model.joblib'
     if os.path.exists(p):
         return joblib.load(p)
     return None
 
+def get_ai_policy_insights(city, temp, year, status, tourist_pct, lst_max):
+    """Generates dynamic, non-templated policy recommendations using Google Gemini API."""
+    try:
+        if "GEMINI_API_KEY" in st.secrets:
+            genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            prompt = f"""
+            Act as an expert Sustainable Tourism and Public Health Policy Advisor.
+            Analyze the following climate and infrastructure scenario for the destination: {city}.
+            
+            SCENARIO DATA:
+            - Target Forecast Year: {year}
+            - Forecasted Max Air Temperature: {temp}°C
+            - Localized Urban Heat Island (LST Peak): {lst_max}°C
+            - Hospital Infrastructure Status: {status}
+            - Tourist Burden on Emergency Departments: {tourist_pct}% of operational capacity.
+            
+            TASK:
+            Provide exactly 3 concise, highly actionable policy recommendations (bullet points) for the local destination management organization (DMO) and city council to mitigate this specific level of tourism-related hospital strain and protect the destination's international reputation.
+            Use a professional, academic, and authoritative tone. Do not use emojis. Limit the response to 150 words.
+            """
+            response = model.generate_content(prompt)
+            return response.text
+        else:
+            return "Generative AI policy advisor requires a valid Gemini API Key. Please configure `GEMINI_API_KEY` in Streamlit Secrets to unlock dynamic insights."
+    except Exception as e:
+        return f"AI Service Initialization Error. Please verify API quotas. Log: {str(e)}"
+
 @st.cache_data(show_spinner=False)
 def get_real_cmip6_data(lat, lon, gee_ready):
-    """Fetches NASA NEX-GDDP-CMIP6 tasmax projections."""
     if not gee_ready:
         yrs = np.arange(2025, 2051)
         return pd.DataFrame({'Year': yrs, 'Max_Temp': np.linspace(34.0, 39.5, len(yrs))})
@@ -159,7 +187,6 @@ def safe_stat(d, key):
     return round(d.get(key, 0.0), 1) if d and d.get(key) is not None else 0.0
 
 def get_date_range(year_selection):
-    """Parses dropdown selection into GEE date filters."""
     if year_selection == "2019-2025 Multi-Year Composite":
         return '2019-01-01', '2025-12-31'
     else:
@@ -167,7 +194,6 @@ def get_date_range(year_selection):
 
 @st.cache_data(show_spinner=False)
 def gen_baseline_map(lat, lon, year_selection, gee_ready):
-    """Generates the native 100m Landsat LST baseline map."""
     m = geemap.Map(center=[lat, lon], zoom=12, ee_initialize=False, draw_control=False, measure_control=False)
     m.add_basemap("CartoDB.Positron")
     m.add_child(folium.LatLngPopup())
@@ -208,14 +234,13 @@ def gen_baseline_map(lat, lon, year_selection, gee_ready):
             vis_params = {'min': 25, 'max': 50, 'palette': ['#ffffb2', '#fed976', '#feb24c', '#fd8d3c', '#fc4e2a', '#e31a1c', '#b10026'], 'opacity': 0.8}
             m.addLayer(lst_100m.clip(roi), vis_params, f'Baseline Native LST (100m)')
             m.addLayer(ee.Image().paint(roi, 0, 2), {'palette': ['#1E293B']}, 'Tourism Precinct Boundary')
-            m.add_colorbar(vis_params, label="Surface Temperature (°C)", orientation="horizontal")
+            m.add_colorbar(vis_params, label="Surface Temperature (Celsius)", orientation="horizontal")
     except Exception as e:
         pass
         
     return m.to_html(), stats_dict
 
 def run_rf_downscaling_split(lat, lon, year_selection):
-    """Executes on-the-fly spatial downscaling using GEE Random Forest and generates a split-panel map."""
     try:
         pt = ee.Geometry.Point([lon, lat])
         roi = pt.buffer(8000)
@@ -289,14 +314,13 @@ def run_rf_downscaling_split(lat, lon, year_selection):
         SideBySideLayers(left_tile, right_tile).add_to(m)
         
         m.addLayer(ee.Image().paint(roi, 0, 2), {'palette': ['#1E293B']}, 'Precinct Boundary')
-        m.add_colorbar(vis, label="Surface Temperature (°C)", orientation="horizontal")
+        m.add_colorbar(vis, label="Surface Temperature (Celsius)", orientation="horizontal")
         
         return m.to_html(), df_eval, rmse, r2, dict_imp, comp_stats
     except Exception as e:
         return None, str(e), None, None, None, None
 
 def run_ml_inf(mdl, tmp, is_hw, is_hol, scale_factor=1.0):
-    """Infers ED strain using the trained Random Forest model and applies demographic scaling."""
     if mdl:
         df_i = pd.DataFrame({'Mx_T': [tmp], 'Is_HW': [is_hw], 'Is_Hol': [is_hol]})
         pd_pax = mdl.predict(df_i)[0] * scale_factor
@@ -380,7 +404,7 @@ df_cities['Type'] = np.where(df_cities['City'].str.contains('Australia'), 'Prima
 # =====================================================================
 st.markdown('<div class="header-card">', unsafe_allow_html=True)
 st.markdown("<h1>V-HEAT: Destination Infrastructure Resilience Model</h1>", unsafe_allow_html=True)
-st.markdown("<p>An integrated analytical framework linking Earth Observation (GEE), Historical Climate baselines (BoM), Future Projections (NASA CMIP6), and Public Health infrastructure to assess tourism destination carrying capacity under extreme heat.</p>", unsafe_allow_html=True)
+st.markdown("<p>An integrated analytical framework linking Earth Observation, Historical Climate baselines, Future Projections, and Public Health infrastructure to assess tourism destination carrying capacity under extreme heat.</p>", unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
 with st.expander("How to Use This Dashboard"):
@@ -483,11 +507,17 @@ sel_lat, sel_lon = city_row['Lat'], city_row['Lon']
 is_dp = ("Australia" in st.session_state.selected_city)
 season_txt = "Jun-Aug" if sel_lat > 0 else "Dec-Feb"
 
-# --- THE 3 PILLARS ---
-c1, c2 = st.columns([1.1, 0.9], gap="large")
+# Variables for AI Context
+current_lst_max = 0.0
+current_status = "SAFE"
+current_tourist_pct = 0.0
+
+# --- THE 3 PILLARS (REBALANCED LAYOUT) ---
+# Column 1 gets 60%, Column 2 gets 40% for better spatial emphasis
+c1, c2 = st.columns([1.2, 0.8], gap="large")
 
 with c1:
-    st.markdown('<div class="modern-card">', unsafe_allow_html=True)
+    st.markdown('<div class="modern-card" style="height: 100%;">', unsafe_allow_html=True)
     
     row_title, row_slider = st.columns([2, 1])
     with row_title:
@@ -510,6 +540,8 @@ with c1:
         sc2.metric("Median Temp", f"{base_stats['median']} °C")
         sc3.metric("Average Temp", f"{base_stats['mean']} °C")
         sc4.metric("Peak Hotspot", f"{base_stats['max']} °C")
+        
+        current_lst_max = float(base_stats['max'])
         
         # Inject Average Temp into simulator if state is default
         if base_stats['mean'] > 0 and st.session_state.temp_source in ["Default", "Native LST"]: 
@@ -537,7 +569,9 @@ with c1:
             components.html(map_html_rf, height=450)
             
             st.markdown("##### LST Extracted Statistics: Native vs Downscaled")
-            st.markdown('<span class="subtitle-text">Notice how the downscaled 20m model may detect higher extreme localized temperatures (Hotspots) missed by the 100m baseline, while smoothing anomalous out-of-bounds pixels (Regression to the mean).</span>', unsafe_allow_html=True)
+            st.markdown('<span class="subtitle-text">Notice how the downscaled 20m model may detect higher extreme localized temperatures (Hotspots) missed by the 100m baseline, while smoothing anomalous out-of-bounds pixels.</span>', unsafe_allow_html=True)
+            
+            current_lst_max = float(comp_stats['d_max'])
             
             # Inject Downscaled Average Temp into simulator
             if st.session_state.temp_source in ["Default", "Native LST", "Downscaled LST"]:
@@ -587,7 +621,6 @@ with c2:
     fig2 = go.Figure(go.Scatter(x=df_cmip['Year'], y=df_cmip['Max_Temp'], mode='lines+markers', customdata=df_cmip['Max_Temp'], fill='tozeroy', fillcolor='rgba(229, 62, 62, 0.1)', line=dict(color='#E53E3E', width=3)))
     fig2.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font_color='#1E293B', yaxis_title="Max Air Temp (°C)", margin=dict(t=5, b=5, l=0, r=0), height=150)
     
-    # Dynamic key to reset selection when manual slider is used
     cmip_sel = st.plotly_chart(fig2, on_select="rerun", selection_mode="points", use_container_width=True, key=f"cmip_chart_{st.session_state.cmip_chart_key}")
     if cmip_sel and hasattr(cmip_sel, 'selection'):
         pts = cmip_sel.selection.get('points', [])
@@ -604,10 +637,9 @@ with c2:
     
     if is_dp:
         st.markdown('<div class="modern-card">', unsafe_allow_html=True)
-        st.subheader("3. Destination Capacity Simulator (BoM + Hospital Data)")
+        st.subheader("3. Destination Capacity Simulator")
         st.markdown('<span class="subtitle-text">Machine Learning trained on historical BoM weather & hospital records. Simulates how localized heat extremes and tourist seasons impact infrastructure carrying capacity.</span>', unsafe_allow_html=True)
         
-        # Dynamic Panel for Simulator Status
         if st.session_state.temp_source == "CMIP6":
             st.markdown(f'<div class="sim-panel"><b>Simulation Active:</b> Applying CMIP6 forecast for the year <b>{st.session_state.sim_year_label}</b> at <b>{st.session_state.sim_temp:.1f}°C</b>.</div>', unsafe_allow_html=True)
         elif st.session_state.temp_source == "Manual":
@@ -625,12 +657,12 @@ with c2:
         demographic_scale = city_tourists / 12.0
         
         tot_pax, vis_pax = run_ml_inf(mdl, sim_tmp, sim_hw, sim_hol, scale_factor=demographic_scale)
+        current_tourist_pct = round((vis_pax/tot_pax)*100, 1) if tot_pax > 0 else 0
         
         mc1, mc2 = st.columns(2)
         mc1.metric("Est. Daily Hospital Cases", f"{tot_pax}", delta=f"{'+' if sim_hw else ''}{int(tot_pax*0.12)} (Severe Heat Burden)" if sim_hw else "Baseline", delta_color="inverse")
-        mc2.metric("Transient Tourist Load", f"{vis_pax}", delta=f"{(vis_pax/tot_pax)*100:.1f}% of operating capacity", delta_color="off")
+        mc2.metric("Transient Tourist Load", f"{vis_pax}", delta=f"{current_tourist_pct}% of operating capacity", delta_color="off")
         
-        # Triage Distribution Chart
         st.markdown("##### Predicted Clinical Severity Distribution")
         
         t_dist = [tot_pax*0.05, tot_pax*0.25, tot_pax*0.45, tot_pax*0.25]
@@ -651,11 +683,14 @@ with c2:
         st.plotly_chart(fig_t, use_container_width=True, config={'displayModeBar': False})
         
         if sim_hw and sim_hol:
-            st.markdown('<div class="status-badge status-critical">CRITICAL: Severe Heat Event during Peak Season. High risk of infrastructure failure.</div>', unsafe_allow_html=True)
+            current_status = "CRITICAL"
+            st.markdown('<div class="status-badge status-critical">[ CRITICAL ] Severe Heat Event during Peak Season. High risk of infrastructure failure.</div>', unsafe_allow_html=True)
         elif sim_hw or sim_hol:
-            st.markdown('<div class="status-badge status-warn">WARNING: Elevated Strain. Destination carrying capacity stressed.</div>', unsafe_allow_html=True)
+            current_status = "WARNING"
+            st.markdown('<div class="status-badge status-warn">[ WARNING ] Elevated Strain. Destination carrying capacity stressed.</div>', unsafe_allow_html=True)
         else:
-            st.markdown('<div class="status-badge status-safe">SAFE: Normal Operating Capacity. Destination resilient.</div>', unsafe_allow_html=True)
+            current_status = "SAFE"
+            st.markdown('<div class="status-badge status-safe">[ SAFE ] Normal Operating Capacity. Destination resilient.</div>', unsafe_allow_html=True)
 
         st.markdown('</div>', unsafe_allow_html=True)
     else:
@@ -664,5 +699,49 @@ with c2:
         st.markdown("<p style='color: #64748B;'>The Predictive Simulator requires localized historical health records to establish carrying capacity baselines. Currently, this prototype is trained and unlocked for <b>all major cities in Australia</b>.</p>", unsafe_allow_html=True)
         st.info("Please select an Australian city from the dropdown to unlock the full integration.")
         st.markdown('</div>', unsafe_allow_html=True)
+
+# --- PILLAR 4: AI STRATEGIC POLICY ADVISOR (FULL WIDTH) ---
+if is_dp:
+    st.markdown('<div class="modern-card">', unsafe_allow_html=True)
+    st.subheader("4. AI-Driven Strategic Policy Advisor")
+    st.markdown('<span class="subtitle-text">Generative AI analysis based on the current spatial, climatic, and infrastructure parameters to provide actionable mitigation strategies for destination management.</span>', unsafe_allow_html=True)
+    
+    col_ai1, col_ai2 = st.columns([1, 3], gap="large")
+    
+    with col_ai1:
+        st.markdown("##### Reputation Risk Assessment")
+        if current_status == "CRITICAL":
+            st.markdown('<div class="status-badge status-critical" style="margin-top:0;">[ HIGH RISK ]</div>', unsafe_allow_html=True)
+            st.markdown("<p style='font-size: 0.9rem; color: #64748B; margin-top: 10px;'>Potential for negative international press, increased travel insurance claims, and decline in future bookings due to overwhelmed local amenities.</p>", unsafe_allow_html=True)
+        elif current_status == "WARNING":
+            st.markdown('<div class="status-badge status-warn" style="margin-top:0;">[ MODERATE RISK ]</div>', unsafe_allow_html=True)
+            st.markdown("<p style='font-size: 0.9rem; color: #64748B; margin-top: 10px;'>Noticeable decline in visitor satisfaction. Minor infrastructure delays expected. Preventative communications advised.</p>", unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="status-badge status-safe" style="margin-top:0;">[ LOW RISK ]</div>', unsafe_allow_html=True)
+            st.markdown("<p style='font-size: 0.9rem; color: #64748B; margin-top: 10px;'>Destination operating optimally. High probability of positive visitor experience and sustained tourism reputation.</p>", unsafe_allow_html=True)
+            
+        st.markdown('<div class="btn-ml" style="margin-top: 20px;">', unsafe_allow_html=True)
+        if st.button("Generate AI Policy Brief"):
+            st.session_state.run_ai = True
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with col_ai2:
+        st.markdown("##### Actionable Mitigation Strategies")
+        if st.session_state.get('run_ai', False):
+            with st.spinner("Analyzing current variables via Google Gemini LLM..."):
+                target_year = st.session_state.sim_year_label if st.session_state.sim_year_label not in ["Manual", "Composite Baseline"] else "Current Baseline"
+                ai_response = get_ai_policy_insights(
+                    city=st.session_state.selected_city, 
+                    temp=st.session_state.sim_temp, 
+                    year=target_year, 
+                    status=current_status, 
+                    tourist_pct=current_tourist_pct, 
+                    lst_max=current_lst_max
+                )
+                st.markdown(f'<div class="ai-box">{ai_response}</div>', unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="ai-box" style="color: #94A3B8; text-align: center; padding: 40px;"><i>Click "Generate AI Policy Brief" to formulate dynamic, context-aware policy recommendations based on the currently selected simulation scenario.</i></div>', unsafe_allow_html=True)
+
+    st.markdown('</div>', unsafe_allow_html=True)
 
 st.markdown('<div style="text-align: center; margin-top: 50px; margin-bottom: 20px; color: #64748B; font-size: 0.85rem; font-family: \'Plus Jakarta Sans\', sans-serif;">Developed by Akram Sripandam Prihanantya, 2026.</div>', unsafe_allow_html=True)
