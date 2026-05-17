@@ -33,7 +33,6 @@ css = """
     html, body, [class*="css"]  { font-family: 'Plus Jakarta Sans', sans-serif; scroll-behavior: smooth; }
     .stApp { background-color: #F8FAFC; color: #1E293B; }
     
-    /* Smooth entrance animation for all cards */
     @keyframes slideUpFade {
         from { opacity: 0; transform: translateY(15px); }
         to { opacity: 1; transform: translateY(0); }
@@ -78,7 +77,7 @@ css = """
 st.markdown(css, unsafe_allow_html=True)
 
 # =====================================================================
-# 2. SESSION STATE MANAGEMENT
+# 2. SESSION STATE MANAGEMENT (ROBUST UX SYNC)
 # =====================================================================
 if 'selected_city' not in st.session_state:
     st.session_state.selected_city = "Gold Coast, Australia"
@@ -91,7 +90,11 @@ if 'rf_results' not in st.session_state:
 if 'sim_temp' not in st.session_state:
     st.session_state.sim_temp = 35.0
 if 'sim_year_label' not in st.session_state:
-    st.session_state.sim_year_label = "Custom Baseline"
+    st.session_state.sim_year_label = "2023"
+if 'temp_source' not in st.session_state:
+    st.session_state.temp_source = "Default"
+if 'cmip_chart_key' not in st.session_state:
+    st.session_state.cmip_chart_key = 0
 
 # =====================================================================
 # 3. CORE FUNCTIONS (GEE & ML)
@@ -369,6 +372,25 @@ with st.expander("📖 Architecture, Methodology & Transparent Data Sources"):
 mdl = load_ml_mdl()
 gee_status = init_ee()
 
+# --- CALLBACKS UNTUK NAVIGATION SINKRONISASI ---
+def on_city_change():
+    st.session_state.selected_city = st.session_state.dropdown_city
+    st.session_state.rf_downscale_run = False 
+    st.session_state.rf_results = None
+    st.session_state.temp_source = "Default"
+
+def on_year_change():
+    st.session_state.selected_year = st.session_state.dropdown_year
+    st.session_state.rf_downscale_run = False 
+    st.session_state.temp_source = "Default"
+
+def on_slider_change():
+    st.session_state.sim_temp = st.session_state.temp_slider
+    st.session_state.temp_source = "Manual"
+    st.session_state.sim_year_label = "Manual"
+    # Mereset seleksi grafik CMIP6 dengan menaikkan chart key
+    st.session_state.cmip_chart_key += 1
+
 # --- NAVIGATOR TABS ---
 tab_nav, tab_global = st.tabs(["📍 Local Precinct Analysis", "🌍 Global Destination Vulnerability Index"])
 
@@ -377,12 +399,7 @@ with tab_nav:
     c_nav1, c_nav2 = st.columns([1, 3])
     with c_nav1:
         curr_idx = df_cities['City'].tolist().index(st.session_state.selected_city) if st.session_state.selected_city in df_cities['City'].tolist() else 0
-        new_city = st.selectbox("Select Tourism Precinct (50 Cities):", df_cities['City'].tolist(), index=curr_idx)
-        if new_city != st.session_state.selected_city:
-            st.session_state.selected_city = new_city
-            st.session_state.rf_downscale_run = False 
-            st.session_state.rf_results = None
-            st.rerun()
+        st.selectbox("Select Tourism Precinct (50 Cities):", df_cities['City'].tolist(), index=curr_idx, key="dropdown_city", on_change=on_city_change)
     with c_nav2:
         st.markdown("<br>", unsafe_allow_html=True)
         if "Australia" in st.session_state.selected_city:
@@ -425,12 +442,10 @@ with c1:
     with row_title:
         st.subheader("1. Spatial Hazard Exposure")
     with row_slider:
-        new_year = st.selectbox("Select Temporal Baseline:", [2024, 2023, 2022, 2021, 2020, 2019], index=[2024, 2023, 2022, 2021, 2020, 2019].index(st.session_state.selected_year))
-        if new_year != st.session_state.selected_year:
-            st.session_state.selected_year = new_year
-            st.session_state.rf_downscale_run = False 
-            st.session_state.sim_year_label = "Custom Baseline"
-            st.rerun()
+        # Time Slider dropdown
+        yr_options = [2024, 2023, 2022, 2021, 2020, 2019]
+        yr_idx = yr_options.index(st.session_state.selected_year)
+        st.selectbox("Select Temporal Baseline:", yr_options, index=yr_idx, key="dropdown_year", on_change=on_year_change)
 
     st.markdown(f'<span class="subtitle-text"><b>Data Source:</b> Landsat 8 TIRS. Peak summer ({season_txt}) thermal signatures for {st.session_state.selected_year}.</span>', unsafe_allow_html=True)
     
@@ -446,8 +461,10 @@ with c1:
         sc2.metric("Average Temp", f"{base_stats['mean']} °C")
         sc3.metric("Peak Hotspot", f"{base_stats['max']} °C")
         
-        if base_stats['mean'] > 0 and st.session_state.sim_year_label == "Custom Baseline": 
+        # Inject the Average Temp from Native LST if it's the default state
+        if base_stats['mean'] > 0 and st.session_state.temp_source in ["Default", "Native LST"]: 
             st.session_state.sim_temp = float(base_stats['mean'])
+            st.session_state.temp_source = "Native LST"
         
         st.markdown("<hr style='margin: 15px 0; border-color: #E2E8F0;'>", unsafe_allow_html=True)
         st.markdown('<div class="btn-ml">', unsafe_allow_html=True)
@@ -458,7 +475,7 @@ with c1:
         
     # KONDISI 2: PETA DOWNSCALE & SPLIT PANEL
     else:
-        with st.spinner("Executing Machine Learning Downscaling. Slide the center bar to compare Native vs Downscaled maps..."):
+        with st.spinner("🤖 Executing Machine Learning Downscaling (~15s). Slide the center bar to compare Native vs Downscaled maps..."):
             if st.session_state.rf_results is None:
                 map_html_rf, df_ev, rmse, r2, dict_imp, comp_stats = run_rf_downscaling_split(sel_lat, sel_lon, st.session_state.selected_year)
                 st.session_state.rf_results = (map_html_rf, df_ev, rmse, r2, dict_imp, comp_stats)
@@ -471,8 +488,10 @@ with c1:
             st.markdown("##### 📊 LST Extracted Statistics: Native vs Downscaled")
             st.markdown('<span class="subtitle-text">Notice how the downscaled 20m model may detect higher extreme localized temperatures (Hotspots) missed by the 100m baseline, while smoothing anomalous out-of-bounds pixels (Regression to the mean).</span>', unsafe_allow_html=True)
             
-            if st.session_state.sim_year_label == "Custom Baseline":
-                st.session_state.sim_temp = float(comp_stats['d_max'])
+            # Inject the Average Temp from Downscaled LST into simulator
+            if st.session_state.temp_source in ["Default", "Native LST", "Downscaled LST"]:
+                st.session_state.sim_temp = float(comp_stats['d_mean'])
+                st.session_state.temp_source = "Downscaled LST"
             
             s1, s2, s3 = st.columns(3)
             s1.metric("Coolest Area (20m)", f"{comp_stats['d_min']} °C", f"{round(comp_stats['d_min'] - comp_stats['n_min'], 1)} °C vs Native", delta_color="inverse")
@@ -499,13 +518,14 @@ with c1:
         if st.button("🔙 Back to Baseline Map"):
             st.session_state.rf_downscale_run = False
             st.session_state.rf_results = None
+            st.session_state.temp_source = "Default"
             st.rerun()
 
     st.markdown('</div>', unsafe_allow_html=True)
 
 # PILLAR 2 & 3: IKLIM & INFRASTRUKTUR
 with c2:
-    # PILLAR 2: Terbuka untuk seluruh Dunia!
+    # PILLAR 2: CMIP6
     st.markdown('<div class="modern-card">', unsafe_allow_html=True)
     st.subheader("2. Future Climate Projections (CMIP6)")
     st.markdown('<span class="subtitle-text">NASA NEX-GDDP (Model: ACCESS-CM2). <b>Select a projected year on the chart</b> to automatically load its temperature into the Infrastructure Simulator below.</span>', unsafe_allow_html=True)
@@ -516,35 +536,38 @@ with c2:
     fig2 = go.Figure(go.Scatter(x=df_cmip['Year'], y=df_cmip['Max_Temp'], mode='lines+markers', customdata=df_cmip['Max_Temp'], fill='tozeroy', fillcolor='rgba(229, 62, 62, 0.1)', line=dict(color='#E53E3E', width=3)))
     fig2.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font_color='#1E293B', yaxis_title="Max Air Temp (°C)", margin=dict(t=5, b=5, l=0, r=0), height=150)
     
-    cmip_sel = st.plotly_chart(fig2, on_select="rerun", selection_mode="points", use_container_width=True, key="cmip_chart")
+    # MAGIC FIX: Plotly chart with dynamic key to allow reset selection
+    cmip_sel = st.plotly_chart(fig2, on_select="rerun", selection_mode="points", use_container_width=True, key=f"cmip_chart_{st.session_state.cmip_chart_key}")
+    
     if cmip_sel and hasattr(cmip_sel, 'selection'):
         pts = cmip_sel.selection.get('points', [])
         if pts and len(pts) > 0:
             new_temp = float(pts[0].get('customdata'))
             new_year = int(pts[0].get('x'))
-            if st.session_state.sim_temp != new_temp:
+            if st.session_state.sim_temp != new_temp or st.session_state.temp_source != "CMIP6":
                 st.session_state.sim_temp = new_temp
                 st.session_state.sim_year_label = str(new_year)
+                st.session_state.temp_source = "CMIP6"
                 st.rerun() 
     st.markdown('</div>', unsafe_allow_html=True)
     
-    # PILLAR 3: Hanya terbuka untuk Australia
+    # PILLAR 3: SIMULATOR (Khusus Australia)
     if is_dp:
         st.markdown('<div class="modern-card">', unsafe_allow_html=True)
         st.subheader("3. Destination Capacity Simulator (BoM + Hospital Data)")
         st.markdown('<span class="subtitle-text">Machine Learning trained on historical BoM weather & hospital records. Simulates how localized heat extremes and tourist seasons impact infrastructure carrying capacity.</span>', unsafe_allow_html=True)
         
         # SMART UX: Dynamic Panel for Simulator Status
-        if st.session_state.sim_year_label != "Custom Baseline":
+        if st.session_state.temp_source == "CMIP6":
             st.markdown(f'<div class="sim-panel">📌 <b>Simulation Active:</b> Applying CMIP6 forecast for the year <b>{st.session_state.sim_year_label}</b> at <b>{st.session_state.sim_temp:.1f}°C</b>.</div>', unsafe_allow_html=True)
-        else:
-            st.markdown(f'<div class="sim-panel-manual">⚙️ <b>Manual Baseline Mode:</b> Analyzing current spatial extraction limits. Move slider to override.</div>', unsafe_allow_html=True)
+        elif st.session_state.temp_source == "Manual":
+            st.markdown(f'<div class="sim-panel-manual">⚙️ <b>Manual Mode:</b> Custom temperature applied. CMIP6 selection cleared.</div>', unsafe_allow_html=True)
+        elif st.session_state.temp_source == "Native LST":
+            st.markdown(f'<div class="sim-panel-manual">🌍 <b>Baseline Mode:</b> Average temp from Native LST (100m) used (<b>{st.session_state.sim_temp:.1f}°C</b>).</div>', unsafe_allow_html=True)
+        elif st.session_state.temp_source == "Downscaled LST":
+            st.markdown(f'<div class="sim-panel">🛰️ <b>GeoAI Mode:</b> Average temp from Downscaled LST (20m) used (<b>{st.session_state.sim_temp:.1f}°C</b>).</div>', unsafe_allow_html=True)
 
-        def on_slider_change():
-            st.session_state.sim_temp = st.session_state.temp_slider
-            st.session_state.sim_year_label = "Custom Baseline"
-            
-        sim_tmp = st.slider("Forecasted Maximum Temperature (°C)", min_value=25.0, max_value=48.0, value=float(st.session_state.sim_temp), step=0.1, key="temp_slider", on_change=on_slider_change)
+        sim_tmp = st.slider("Forecasted Maximum Temperature (°C)", min_value=15.0, max_value=55.0, value=float(st.session_state.sim_temp), step=0.1, key="temp_slider", on_change=on_slider_change)
         sim_hw = 1 if sim_tmp >= 35.0 else 0
         sim_hol = st.radio("Tourism Seasonality Exposure", [1, 0], format_func=lambda x: f"Peak Tourist Season ({season_txt})" if x==1 else "Off-Peak Season", horizontal=True)
         
