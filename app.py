@@ -123,17 +123,17 @@ def init_ee():
 
 @st.cache_resource(show_spinner=False)
 def load_ml_mdl():
+    """Loads the pre-trained Scikit-Learn hospital strain model."""
     p = 'rf_vheat_model.joblib'
     if os.path.exists(p):
         return joblib.load(p)
     return None
 
 def get_ai_policy_insights(city, temp, year, status, tourist_pct, lst_max):
-    """Generates dynamic, non-templated policy recommendations using Google Gemini API."""
+    """Generates dynamic, non-templated policy recommendations using Google Gemini API with Google Search Grounding."""
     try:
         if "GEMINI_API_KEY" in st.secrets:
             genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-            # Menggunakan model Gemini 3.1 Flash Lite Preview sesuai instruksi
             model = genai.GenerativeModel('gemini-3.1-flash-lite-preview')
             prompt = f"""
             Act as an expert Sustainable Tourism and Public Health Policy Advisor.
@@ -147,10 +147,13 @@ def get_ai_policy_insights(city, temp, year, status, tourist_pct, lst_max):
             - Tourist Burden on Emergency Departments: {tourist_pct}% of operational capacity.
             
             TASK:
-            Provide exactly 3 concise, highly actionable policy recommendations (bullet points) for the local destination management organization (DMO) and city council to mitigate this specific level of tourism-related hospital strain and protect the destination's international reputation.
-            Use a professional, academic, and authoritative tone. Do not use emojis. Limit the response to 150 words.
+            1. Provide exactly 3 concise, highly actionable policy recommendations (bullet points) for the local destination management organization (DMO) and city council to mitigate this specific level of tourism-related hospital strain.
+            2. Base your recommendations on real, up-to-date climate adaptation strategies, tourism frameworks, or heatwave response plans specifically implemented in or highly relevant to {city}. Search the web for current context.
+            3. CRITICAL: Align the tone and strategic focus directly with the published research paradigms of Professor Susanne Becken (expert in Sustainable Tourism and Climate Change Adaptation). Specifically emphasize "systemic destination resilience", "tourism-climate risk management", "visitor vulnerability/safety", and the "economic and reputational risks" of failing to adapt to climate change.
+            4. Use a professional, academic, and authoritative tone. Do not use emojis. Limit the response to 150 words.
             """
-            response = model.generate_content(prompt)
+            # Mengaktifkan Google Search Grounding secara native
+            response = model.generate_content(prompt, tools="google_search_retrieval")
             return response.text
         else:
             return "Generative AI policy advisor requires a valid Gemini API Key. Please configure `GEMINI_API_KEY` in Streamlit Secrets to unlock dynamic insights."
