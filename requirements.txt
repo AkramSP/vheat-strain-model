@@ -10,5 +10,5 @@ numpy
 plotly
 scikit-learn==1.6.1
 joblib
-google-generativeai
 folium
+google-generativeai
