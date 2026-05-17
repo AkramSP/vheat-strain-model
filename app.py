@@ -13,6 +13,7 @@ import folium
 from folium.plugins import SideBySideLayers
 from streamlit_folium import st_folium
 import google.generativeai as genai
+import branca.colormap as cm # Added for Map Legend
 
 # =====================================================================
 # HOTFIX PATCH & WARNING SUPPRESSION
@@ -520,7 +521,15 @@ with c1:
     
     # Pure Folium Map Rendering
     m_base = folium.Map(location=[sel_lat, sel_lon], zoom_start=12, control_scale=True)
-    folium.TileLayer('CartoDB positron', name="Light Map", control=False).add_to(m_base)
+    folium.TileLayer('CartoDB positron', name="Light Map", control=False, attr="CARTO").add_to(m_base)
+    
+    # Inject CSS directly into Folium iframe to minimize attribution text size
+    m_base.get_root().html.add_child(folium.Element("<style>.leaflet-control-attribution { font-size: 8px !important; color: #94A3B8 !important; background: transparent !important; } .leaflet-control-attribution a { color: #94A3B8 !important; }</style>"))
+    
+    # Render Interactive Legend (25 - 50 C)
+    colormap = cm.LinearColormap(colors=['#ffffb2', '#fed976', '#feb24c', '#fd8d3c', '#fc4e2a', '#e31a1c', '#b10026'], vmin=25, vmax=50)
+    colormap.caption = 'Surface Temperature (Celsius)'
+    m_base.add_child(colormap)
     
     if not st.session_state.rf_downscale_run:
         with st.spinner(f"Extracting Spatial Analytics for {st.session_state.selected_year}..."):
@@ -569,11 +578,11 @@ with c1:
             
             st.markdown("<hr style='margin: 15px 0; border-color: #E2E8F0;'>", unsafe_allow_html=True)
             st.markdown('<div class="btn-ml">', unsafe_allow_html=True)
-            st.button("Run Spatial Downscaling Model (100m to 20m)", on_click=on_downscale_click)
+            st.button("Run Spatial Downscaling Model (~15s)", on_click=on_downscale_click)
             st.markdown('</div>', unsafe_allow_html=True)
         
     else:
-        with st.spinner("Executing Machine Learning Downscaling. Processing high-res predictors..."):
+        with st.spinner("Executing Machine Learning Downscaling (~15s). Processing high-res predictors..."):
             # Robust State Fix: using .get() to prevent AttributeError on callback re-runs
             if st.session_state.get('rf_results') is None:
                 lst_100m, lst_20m, df_eval, rmse, r2, dict_imp, comp_stats, roi = get_ee_downscaled_data(sel_lat, sel_lon, st.session_state.selected_year, gee_status)
@@ -752,14 +761,14 @@ if is_dp:
             st.markdown("<p style='font-size: 0.9rem; color: #64748B; margin-top: 10px;'>Destination operating optimally. High probability of positive visitor experience and sustained tourism reputation.</p>", unsafe_allow_html=True)
             
         st.markdown('<div class="btn-ml" style="margin-top: 20px;">', unsafe_allow_html=True)
-        if st.button("Generate AI Policy Brief"):
+        if st.button("Generate AI Policy Brief (~5s)"):
             st.session_state.run_ai = True
         st.markdown('</div>', unsafe_allow_html=True)
 
     with col_ai2:
         st.markdown("##### Actionable Mitigation Strategies")
         if st.session_state.get('run_ai', False):
-            with st.spinner("Analyzing current variables via Google Gemini LLM..."):
+            with st.spinner("Analyzing current variables via Google Gemini LLM (~5s)..."):
                 target_year = st.session_state.sim_year_label if st.session_state.sim_year_label not in ["Manual", "Composite Baseline"] else "Current Baseline"
                 ai_response = get_ai_policy_insights(
                     city=st.session_state.selected_city, temp=st.session_state.sim_temp, year=target_year, status=current_status, tourist_pct=current_tourist_pct, lst_max=current_lst_max
