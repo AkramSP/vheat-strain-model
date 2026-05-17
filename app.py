@@ -410,12 +410,16 @@ with st.expander("Architecture, Methodology & Transparent Data Sources"):
     * **Demographic Scaling Factor (Proof of Concept Assumption):** Because this model is trained exclusively on the Gold Coast (12 Million annual tourists), simulating capacity for other Australian cities utilizes a synthetic scaling multiplier. This compares local tourist volume against the Gold Coast baseline to proportionally scale the hospital bed footprint. 
     * *Tourist volumes for the global matrix are synthesized estimates benchmarking the Mastercard Global Destination Cities Index.*
     
+    **Definition of Extreme Heat (The 35°C Threshold):**
+    * In operational climatology, the Bureau of Meteorology (BoM) defines severe heat events using the Excess Heat Factor (EHF), a complex index comparing 3-day average temperatures against local 95th percentile historical baselines.
+    * For the purpose of this interactive computational prototype, a standardized absolute threshold of **35°C** is utilized. This temperature is widely recognized by Australian occupational health and safety protocols (e.g., Safe Work Australia) as a critical trigger point for acute thermal stress and physiological vulnerability.
+    
     **Resilience Status & Clinical Triage Assumptions:**
     * **SAFE:** Triggered when the maximum temperature is below the extreme heat threshold (<35°C) during off-peak seasons.
     * **WARNING:** Triggered by EITHER an extreme heat event (≥35°C) OR peak tourist season volume.
     * **CRITICAL:** Triggered when BOTH an extreme heat event (≥35°C) AND peak tourist season occur simultaneously, presenting a severe risk of infrastructure failure.
     * **Baseline vs Heat Stress Burden:** "Baseline" refers to the expected daily emergency presentations under normal thermal conditions. The delta (Heat Stress Burden) represents the excess patient influx directly attributable to temperatures exceeding 35°C.
-    * **Clinical Triage Shift:** During heatwaves (≥35°C), the model assumes a proportional shift in clinical severity. Presentations requiring 'Resuscitation' and 'Emergency' care increase by approximately 7-13% due to acute thermal stress, while 'Non-Urgent' cases relatively decrease.
+    * **Clinical Triage Shift:** During severe heat events (≥35°C), the model assumes a proportional shift in clinical severity. Presentations requiring 'Resuscitation' and 'Emergency' care increase by approximately 7-13% due to acute thermal stress, while 'Non-Urgent' cases relatively decrease.
     """)
 
 mdl = load_ml_mdl()
@@ -623,7 +627,7 @@ with c2:
         tot_pax, vis_pax = run_ml_inf(mdl, sim_tmp, sim_hw, sim_hol, scale_factor=demographic_scale)
         
         mc1, mc2 = st.columns(2)
-        mc1.metric("Est. Daily Hospital Cases", f"{tot_pax}", delta=f"{'+' if sim_hw else ''}{int(tot_pax*0.12)} (Heat Stress Burden)" if sim_hw else "Baseline", delta_color="inverse")
+        mc1.metric("Est. Daily Hospital Cases", f"{tot_pax}", delta=f"{'+' if sim_hw else ''}{int(tot_pax*0.12)} (Severe Heat Burden)" if sim_hw else "Baseline", delta_color="inverse")
         mc2.metric("Transient Tourist Load", f"{vis_pax}", delta=f"{(vis_pax/tot_pax)*100:.1f}% of operating capacity", delta_color="off")
         
         # Triage Distribution Chart
@@ -647,7 +651,7 @@ with c2:
         st.plotly_chart(fig_t, use_container_width=True, config={'displayModeBar': False})
         
         if sim_hw and sim_hol:
-            st.markdown('<div class="status-badge status-critical">CRITICAL: Severe Heatwave during Peak Season. High risk of infrastructure failure.</div>', unsafe_allow_html=True)
+            st.markdown('<div class="status-badge status-critical">CRITICAL: Severe Heat Event during Peak Season. High risk of infrastructure failure.</div>', unsafe_allow_html=True)
         elif sim_hw or sim_hol:
             st.markdown('<div class="status-badge status-warn">WARNING: Elevated Strain. Destination carrying capacity stressed.</div>', unsafe_allow_html=True)
         else:
