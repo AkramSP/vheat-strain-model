@@ -139,10 +139,17 @@ def get_ai_policy_insights(city, temp, year, status, tourist_pct, lst_max):
             genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
             
             # Step 1: Information Retrieval via gemini-2.5-flash (Grounding enabled)
-            model_search = genai.GenerativeModel('gemini-2.5-flash')
-            search_prompt = f"Search the web for recent climate adaptation strategies, sustainable tourism frameworks, or heatwave response plans implemented in {city}. Provide a concise factual summary of the specific local policies."
-            search_response = model_search.generate_content(search_prompt, tools="google_search_retrieval")
-            local_context = search_response.text
+            # Out of the Box: Robust error handling for dynamic API changes
+            local_context = "General sustainable tourism resilience protocols."
+            try:
+                model_search = genai.GenerativeModel('gemini-2.5-flash')
+                search_prompt = f"Search the web for recent climate adaptation strategies, sustainable tourism frameworks, or heatwave response plans implemented in {city}. Provide a concise factual summary of the specific local policies."
+                search_response = model_search.generate_content(search_prompt, tools="google_search")
+                if search_response and search_response.text:
+                    local_context = search_response.text
+            except Exception as search_err:
+                print(f"Grounding search bypassed due to API constraints. Proceeding with fundamental knowledge. Log: {str(search_err)}")
+                pass # Bypass gracefully without crashing the app
             
             # Step 2: Synthesis and Formatting via gemini-3.1-flash-lite-preview
             model_synth = genai.GenerativeModel('gemini-3.1-flash-lite-preview')
@@ -157,7 +164,7 @@ def get_ai_policy_insights(city, temp, year, status, tourist_pct, lst_max):
             - Hospital Infrastructure Status: {status}
             - Tourist Burden on Emergency Departments: {tourist_pct}% of operational capacity.
             
-            LOCAL CONTEXT (Retrieved from web search):
+            LOCAL CONTEXT (Retrieved from web search if available):
             {local_context}
             
             TASK:
