@@ -69,6 +69,9 @@ css = """
     .sim-panel { background-color: #EFF6FF; border-left: 4px solid #4F46E5; padding: 12px 16px; border-radius: 0 4px 4px 0; font-size: 0.9rem; color: #3730A3; margin-bottom: 15px; animation: slideUpFade 0.3s ease-out forwards; }
     .sim-panel-manual { background-color: #F8FAFC; border-left: 4px solid #94A3B8; padding: 12px 16px; border-radius: 0 4px 4px 0; font-size: 0.9rem; color: #475569; margin-bottom: 15px; animation: slideUpFade 0.3s ease-out forwards; }
     
+    .integration-full { background-color: #F0FDF4; border-left: 4px solid #10B981; padding: 10px 16px; border-radius: 0 4px 4px 0; font-size: 0.95rem; color: #047857; margin-top: 25px; animation: slideUpFade 0.3s ease-out forwards; }
+    .integration-partial { background-color: #F8FAFC; border-left: 4px solid #94A3B8; padding: 10px 16px; border-radius: 0 4px 4px 0; font-size: 0.95rem; color: #475569; margin-top: 25px; animation: slideUpFade 0.3s ease-out forwards; }
+    
     .btn-ml > button { width: 100%; font-weight: 600; background-color: #1E3A8A; color: white; border-radius: 4px; padding: 10px; border: none; transition: all 0.2s ease;}
     .btn-ml > button:hover { background-color: #1E40AF; color: white; border: none; transform: scale(1.01);}
     
@@ -130,12 +133,20 @@ def load_ml_mdl():
     return None
 
 def get_ai_policy_insights(city, temp, year, status, tourist_pct, lst_max):
-    """Generates dynamic, non-templated policy recommendations using Google Gemini API with Google Search Grounding."""
+    """Generates dynamic policy recommendations using a two-step LLM chain (Retrieval via 2.5, Synthesis via 3.1)."""
     try:
         if "GEMINI_API_KEY" in st.secrets:
             genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-            model = genai.GenerativeModel('gemini-3.1-flash-lite-preview')
-            prompt = f"""
+            
+            # Step 1: Information Retrieval via gemini-2.5-flash (Grounding enabled)
+            model_search = genai.GenerativeModel('gemini-2.5-flash')
+            search_prompt = f"Search the web for recent climate adaptation strategies, sustainable tourism frameworks, or heatwave response plans implemented in {city}. Provide a concise factual summary of the specific local policies."
+            search_response = model_search.generate_content(search_prompt, tools="google_search_retrieval")
+            local_context = search_response.text
+            
+            # Step 2: Synthesis and Formatting via gemini-3.1-flash-lite-preview
+            model_synth = genai.GenerativeModel('gemini-3.1-flash-lite-preview')
+            synth_prompt = f"""
             Act as an expert Sustainable Tourism and Public Health Policy Advisor.
             Analyze the following climate and infrastructure scenario for the destination: {city}.
             
@@ -146,19 +157,21 @@ def get_ai_policy_insights(city, temp, year, status, tourist_pct, lst_max):
             - Hospital Infrastructure Status: {status}
             - Tourist Burden on Emergency Departments: {tourist_pct}% of operational capacity.
             
+            LOCAL CONTEXT (Retrieved from web search):
+            {local_context}
+            
             TASK:
             1. Provide exactly 3 concise, highly actionable policy recommendations (bullet points) for the local destination management organization (DMO) and city council to mitigate this specific level of tourism-related hospital strain.
-            2. Base your recommendations on real, up-to-date climate adaptation strategies, tourism frameworks, or heatwave response plans specifically implemented in or highly relevant to {city}. Search the web for current context.
+            2. Integrate the provided LOCAL CONTEXT to ensure the recommendations are highly relevant to {city}.
             3. CRITICAL: Align the tone and strategic focus directly with the published research paradigms of Professor Susanne Becken (expert in Sustainable Tourism and Climate Change Adaptation). Specifically emphasize "systemic destination resilience", "tourism-climate risk management", "visitor vulnerability/safety", and the "economic and reputational risks" of failing to adapt to climate change.
             4. Use a professional, academic, and authoritative tone. Do not use emojis. Limit the response to 150 words.
             """
-            # Mengaktifkan Google Search Grounding secara native
-            response = model.generate_content(prompt, tools="google_search_retrieval")
-            return response.text
+            final_response = model_synth.generate_content(synth_prompt)
+            return final_response.text
         else:
-            return "Generative AI policy advisor requires a valid Gemini API Key. Please configure `GEMINI_API_KEY` in Streamlit Secrets to unlock dynamic insights."
+            return "Generative AI policy advisor requires a valid Gemini API Key. Please configure GEMINI_API_KEY in Streamlit Secrets."
     except Exception as e:
-        return f"AI Service Initialization Error. Please verify API quotas. Log: {str(e)}"
+        return f"AI Service Initialization Error. Please verify API quotas or connection. Log: {str(e)}"
 
 @st.cache_data(show_spinner=False)
 def get_real_cmip6_data(lat, lon, gee_ready):
@@ -482,11 +495,10 @@ with tab_nav:
         curr_idx = df_cities['City'].tolist().index(st.session_state.selected_city) if st.session_state.selected_city in df_cities['City'].tolist() else 0
         st.selectbox("Select Tourism Precinct (50 Cities):", df_cities['City'].tolist(), index=curr_idx, key="dropdown_city", on_change=on_city_change)
     with c_nav2:
-        st.markdown("<br>", unsafe_allow_html=True)
         if "Australia" in st.session_state.selected_city:
-            st.markdown("**Status:** Full Integration Active (Remote Sensing + Local Health Data + NASA CMIP6 Forecast)")
+            st.markdown('<div class="integration-full"><b>Status:</b> Full Integration Active (Remote Sensing + Local Health Data + NASA CMIP6 Forecast)</div>', unsafe_allow_html=True)
         else:
-            st.markdown("**Status:** Partial Integration (Remote Sensing + NASA CMIP6 Forecast Only). Health simulator locked.")
+            st.markdown('<div class="integration-partial"><b>Status:</b> Partial Integration (Remote Sensing + NASA CMIP6 Forecast Only). Health simulator locked.</div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
 with tab_global:
